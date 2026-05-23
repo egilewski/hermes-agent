@@ -971,17 +971,13 @@ class TestSessionConfiguration:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        # Pin the parser so this test doesn't depend on live
-        # ``_KNOWN_PROVIDER_NAMES`` / ``_PROVIDER_ALIASES`` module state
-        # (sibling of the same hardening on
-        # ``test_model_switch_uses_requested_provider``).
+        # This test covers the ACP model-switch handoff, not model-string
+        # parsing. Patch the ACP resolver directly so live provider registry
+        # state from unrelated tests cannot shadow the provider under test.
         monkeypatch.setattr(
-            "hermes_cli.models.parse_model_input",
-            lambda raw, current: ("anthropic", "claude-sonnet-4-6"),
-        )
-        monkeypatch.setattr(
-            "hermes_cli.models.detect_provider_for_model",
-            lambda model, current: None,
+            HermesACPAgent,
+            "_resolve_model_selection",
+            staticmethod(lambda raw, current: ("anthropic", "claude-sonnet-4-6")),
         )
         manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
 
@@ -1555,19 +1551,13 @@ class TestSlashCommands:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
-        # Pin the model-string parser independently of the live
-        # ``_KNOWN_PROVIDER_NAMES`` / ``_PROVIDER_ALIASES`` module state.
-        # Otherwise any test in the same xdist worker that mutates those
-        # globals (e.g. registers a custom provider that shadows
-        # ``anthropic``) flakes this one — observed once in CI as
-        # ``'custom' == 'anthropic'``.
+        # This test covers the ACP model-switch handoff, not model-string
+        # parsing. Patch the ACP resolver directly so live provider registry
+        # state from unrelated tests cannot shadow the provider under test.
         monkeypatch.setattr(
-            "hermes_cli.models.parse_model_input",
-            lambda raw, current: ("anthropic", "claude-sonnet-4-6"),
-        )
-        monkeypatch.setattr(
-            "hermes_cli.models.detect_provider_for_model",
-            lambda model, current: None,
+            HermesACPAgent,
+            "_resolve_model_selection",
+            staticmethod(lambda raw, current: ("anthropic", "claude-sonnet-4-6")),
         )
         manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
 

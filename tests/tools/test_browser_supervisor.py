@@ -40,6 +40,15 @@ def _find_chrome() -> str:
     pytest.skip("no Chrome binary found")
 
 
+def _terminate_chrome(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 @pytest.fixture
 def chrome_cdp(request):
     """Start a headless Chrome with --remote-debugging-port, yield its WS URL.
@@ -89,18 +98,13 @@ def chrome_cdp(request):
         except Exception:
             time.sleep(0.25)
     if ws_url is None:
-        proc.terminate()
-        proc.wait(timeout=5)
+        _terminate_chrome(proc)
         shutil.rmtree(profile, ignore_errors=True)
         pytest.skip("Chrome didn't expose CDP in time")
 
     yield ws_url, port
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except Exception:
-        proc.kill()
+    _terminate_chrome(proc)
     shutil.rmtree(profile, ignore_errors=True)
 
 
