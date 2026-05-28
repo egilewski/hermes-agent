@@ -434,20 +434,32 @@ DANGEROUS_PATTERNS_COMPILED = [
 # bypass the normal Unix-oriented dangerous-command detection because the
 # patterns above target rm/chmod/etc, not Windows CLI interpreters.
 # Issue #33104: Windows executables executed via WSL skip approval.
+_SHELL_ASSIGNMENT_PREFIX = (
+    r'(?:(?:[a-z_][a-z0-9_]*='
+    r'(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s;&|`\n]+)\s+)*)'
+)
+_WSL_CMDPOS = _CMDPOS + _SHELL_ASSIGNMENT_PREFIX
+_WINDOWS_EXECUTABLE_EXTENSIONS = r'(?:exe|com|cmd|bat|ps1|vbs|msi)'
+_WINDOWS_EXECUTABLE_TOKEN = (
+    rf'(?:"(?:\\[^\n]|[^"\\\n])+\.{_WINDOWS_EXECUTABLE_EXTENSIONS}"'
+    rf"|\'(?:\\[^\n]|[^\'\\\n])+\.{_WINDOWS_EXECUTABLE_EXTENSIONS}\'"
+    rf'|(?:\\[^\n]|[^\s;&|`$()<>"\'])+\.{_WINDOWS_EXECUTABLE_EXTENSIONS}(?=$|[\s;&|`)<>\n]))'
+)
 
 _WSL_DANGEROUS_PATTERNS = [
     # Windows command interpreters — can execute arbitrary Windows commands
     # without triggering the Unix-oriented guard above.
-    (r'\bcmd(?:\.exe)?\b', "Windows cmd.exe (command interpreter)"),
-    (r'\bpowershell(?:\.exe)?\b', "Windows PowerShell"),
-    (r'\bpwsh(?:\.exe)?\b', "PowerShell Core (pwsh)"),
+    (_WSL_CMDPOS + r'cmd(?:\.exe)?\b', "Windows cmd.exe (command interpreter)"),
+    (_WSL_CMDPOS + r'powershell(?:\.exe)?\b', "Windows PowerShell"),
+    (_WSL_CMDPOS + r'pwsh(?:\.exe)?\b', "PowerShell Core (pwsh)"),
     # Windows destructive commands that propagate through WSL interop.
     # `del /f /s /q` is the Windows equivalent of `rm -rf`.
-    (r'\bdel\s+/[fFqQsS]', "Windows del with force/quiet/subdirectories"),
-    (r'\brmdir\s+/[sS]', "Windows rmdir with /s (recursive)"),
-    (r'\bformat\s+[a-zA-Z]:', "Windows format drive"),
+    (_WSL_CMDPOS + r'del\s+/[fFqQsS]', "Windows del with force/quiet/subdirectories"),
+    (_WSL_CMDPOS + r'rmdir\s+/[sS]', "Windows rmdir with /s (recursive)"),
+    (_WSL_CMDPOS + r'format\s+[a-zA-Z]:', "Windows format drive"),
     # reg.exe can modify the Windows registry from WSL.
-    (r'\breg(?:\.exe)?\s+(add|delete|import)\b', "Windows registry modification"),
+    (_WSL_CMDPOS + r'reg(?:\.exe)?\s+(add|delete|import)\b', "Windows registry modification"),
+    (_WSL_CMDPOS + _WINDOWS_EXECUTABLE_TOKEN, "Windows interop executable from WSL"),
 ]
 
 _WSL_DANGEROUS_PATTERNS_COMPILED = [

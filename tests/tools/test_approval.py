@@ -1545,6 +1545,52 @@ class TestDetectWSLDangerousCommands:
             assert is_dangerous is True
             assert "registry" in desc.lower()
 
+    def test_arbitrary_exe_detected_in_wsl(self):
+        """Any Windows executable launch should be flagged in WSL."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command("notepad.exe README.md")
+            assert is_dangerous is True
+            assert "windows interop" in desc.lower()
+
+    def test_quoted_mnt_c_exe_detected_in_wsl(self):
+        """Quoted Windows paths with spaces should be flagged in WSL."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command(
+                '"/mnt/c/Program Files/Git/cmd/git.exe" status'
+            )
+            assert is_dangerous is True
+            assert "windows interop" in desc.lower()
+
+    def test_vbs_host_detected_in_wsl(self):
+        """Windows script hosts should be flagged in WSL."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command("wscript.exe //E:vbscript file.vbs")
+            assert is_dangerous is True
+            assert "windows interop" in desc.lower()
+
+    def test_env_assignment_before_exe_detected_in_wsl(self):
+        """Shell assignments before Windows executables should still be flagged."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command("FOO=bar cmd.exe /c dir")
+            assert is_dangerous is True
+            assert "cmd" in desc.lower()
+
+    def test_echo_cmd_exe_not_detected_in_wsl(self):
+        """Mentions of Windows executables as arguments should not be flagged."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command("echo cmd.exe")
+            assert is_dangerous is False
+            assert key is None
+            assert desc is None
+
+    def test_grep_powershell_exe_not_detected_in_wsl(self):
+        """Search terms that mention Windows executables should not be flagged."""
+        with mock_patch("hermes_constants.is_wsl", return_value=True):
+            is_dangerous, key, desc = detect_dangerous_command("grep powershell.exe README.md")
+            assert is_dangerous is False
+            assert key is None
+            assert desc is None
+
     def test_cmd_not_detected_on_native_linux(self):
         """cmd should NOT be flagged on native Linux (not WSL)."""
         with mock_patch("hermes_constants.is_wsl", return_value=False):
@@ -1562,4 +1608,3 @@ class TestDetectWSLDangerousCommands:
             # Should not be flagged by WSL patterns
             if is_dangerous:
                 assert "powershell" not in desc.lower() or "wsl" not in desc.lower()
-
