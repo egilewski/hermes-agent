@@ -186,7 +186,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-arm64:
     if: github.repository == 'NousResearch/hermes-agent' || (github.repository == 'egilewski/hermes-agent' && startsWith(github.ref, 'refs/heads/experiment/29155-arm64-docker-'))
-    runs-on: ubicloud-standard-4-arm
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     outputs:
       digest: ${{ steps.push.outputs.digest }}
