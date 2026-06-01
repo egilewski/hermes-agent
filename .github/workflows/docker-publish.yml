@@ -2,7 +2,10 @@ name: Docker Build and Publish
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      # Experimental fork-only arm64 Docker runner comparison for #36739.
+      - experiment/29155-arm64-docker-*
     paths:
       - '**/*.py'
       - 'pyproject.toml'
@@ -182,8 +185,8 @@ jobs:
   # smoke test, then on push/release push by digest.
   # ---------------------------------------------------------------------------
   build-arm64:
-    if: github.repository == 'NousResearch/hermes-agent'
-    runs-on: ubuntu-24.04-arm
+    if: github.repository == 'NousResearch/hermes-agent' || (github.repository == 'egilewski/hermes-agent' && startsWith(github.ref, 'refs/heads/experiment/29155-arm64-docker-'))
+    runs-on: ubicloud-standard-4-arm
     timeout-minutes: 45
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -201,7 +204,7 @@ jobs:
       # outlive GitHub's short-lived Azure cache SAS token, then fail while
       # reading or writing cache blobs before the smoke test can run.
       - name: Build image (arm64, smoke test, uncached PR)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || (github.repository == 'egilewski/hermes-agent' && startsWith(github.ref, 'refs/heads/experiment/29155-arm64-docker-'))
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
@@ -215,7 +218,7 @@ jobs:
       # Main/release builds still use the per-arch gha cache so the digest
       # push below can reuse layers from this smoke-test build.
       - name: Build image (arm64, smoke test, cached publish)
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !(github.repository == 'egilewski/hermes-agent' && startsWith(github.ref, 'refs/heads/experiment/29155-arm64-docker-'))
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
