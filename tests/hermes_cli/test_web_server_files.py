@@ -8,13 +8,17 @@ from starlette.testclient import TestClient
 from hermes_cli import web_server
 
 
-def _client_with_app_state():
+def _client_with_app_state(
+    *,
+    base_url: str = "http://testserver",
+    peer: tuple[str, int] = ("testclient", 50000),
+):
     prev_auth_required = getattr(web_server.app.state, "auth_required", None)
     prev_bound_host = getattr(web_server.app.state, "bound_host", None)
     web_server.app.state.auth_required = False
     web_server.app.state.bound_host = None
 
-    client = TestClient(web_server.app)
+    client = TestClient(web_server.app, base_url=base_url, client=peer)
     client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
     return client, prev_auth_required, prev_bound_host
 
@@ -488,3 +492,52 @@ def test_stream_upload_cleans_temp_on_cancellation(forced_files_client):
     # ... and no .upload temp file was left behind.
     leftovers = [p.name for p in target.parent.iterdir() if ".upload" in p.name]
     assert leftovers == [], f"temp upload files leaked on cancellation: {leftovers}"
+
+
+def test_managed_files_policy_treats_ipv4_mapped_loopback_as_local(monkeypatch):
+    """IPv4-mapped IPv6 loopback must keep file browsing in local mode."""
+    monkeypatch.delenv("HERMES_DASHBOARD_FILES_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    client, prev_auth_required, prev_bound_host = _client_with_app_state()
+    try:
+        request = SimpleNamespace(
+            app=web_server.app,
+            client=SimpleNamespace(host="::ffff:127.0.0.1"),
+            url=SimpleNamespace(hostname="::ffff:127.0.0.1"),
+        )
+        policy = web_server._managed_files_policy(request, create_root=False)
+    finally:
+        _restore_app_state(prev_auth_required, prev_bound_host)
+        client.close()
+
+    assert policy.locked_root is None
+    assert policy.can_change_path is True
+
+
+def test_files_endpoint_treats_ipv4_mapped_loopback_as_local(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "local.txt").write_text("local")
+    monkeypatch.delenv("HERMES_DASHBOARD_FILES_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+
+    client, prev_auth_required, prev_bound_host = _client_with_app_state(
+        base_url="http://dashboard.example",
+        peer=("::ffff:127.0.0.1", 50000),
+    )
+    try:
+        response = client.get(
+            "/api/files",
+            headers={"Host": "[::ffff:127.0.0.1]:9119"},
+        )
+    finally:
+        _restore_app_state(prev_auth_required, prev_bound_host)
+        client.close()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["path"] == str(home)
+    assert body["locked_root"] is None
+    assert body["can_change_path"] is True
+    assert body["entries"][0]["path"] == str(home / "local.txt")

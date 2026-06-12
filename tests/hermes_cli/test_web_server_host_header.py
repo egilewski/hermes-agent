@@ -26,11 +26,12 @@ class TestHostHeaderValidator:
     def test_loopback_bind_accepts_loopback_names(self):
         from hermes_cli.web_server import _is_accepted_host
 
-        for bound in ("127.0.0.1", "localhost", "::1"):
+        for bound in ("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"):
             for host_header in (
                 "127.0.0.1", "127.0.0.1:9119",
-                "localhost", "localhost:9119",
+                "localhost", "localhost.", "localhost:9119",
                 "[::1]", "[::1]:9119",
+                "[::ffff:127.0.0.1]", "[::ffff:127.0.0.1]:9119",
             ):
                 assert _is_accepted_host(host_header, bound), (
                     f"bound={bound} must accept host={host_header}"
@@ -131,6 +132,28 @@ class TestHostHeaderMiddleware:
             if hasattr(app.state, "bound_host"):
                 del app.state.bound_host
 
+    def test_ipv4_mapped_loopback_request_accepted(self, monkeypatch, tmp_path):
+        from fastapi.testclient import TestClient
+        from hermes_cli.web_server import app
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        app.state.bound_host = "::ffff:127.0.0.1"
+        try:
+            client = TestClient(
+                app,
+                base_url="http://dashboard.example",
+                client=("::ffff:127.0.0.1", 50000),
+            )
+            resp = client.get(
+                "/api/status",
+                headers={"Host": "[::ffff:127.0.0.1]:9119"},
+            )
+            assert resp.status_code != 400
+            assert "Invalid Host header" not in resp.json().get("detail", "")
+        finally:
+            if hasattr(app.state, "bound_host"):
+                del app.state.bound_host
+
     def test_no_bound_host_skips_validation(self):
         """If app.state.bound_host isn't set (e.g. running under test
         infra without calling start_server), middleware must pass through
@@ -212,6 +235,34 @@ class TestWebSocketHostOriginGuard:
             headers={
                 "Host": "localhost:9119",
                 "Origin": "http://localhost:9119",
+            },
+        ):
+            pass
+
+    def test_ipv4_mapped_loopback_websocket_host_and_origin_are_accepted(
+        self, monkeypatch, tmp_path
+    ):
+        from fastapi.testclient import TestClient
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(
+            ws.app.state, "bound_host", "::ffff:127.0.0.1", raising=False
+        )
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(
+            ws.app,
+            base_url="http://dashboard.example",
+            client=("::ffff:127.0.0.1", 50000),
+        )
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": "[::ffff:127.0.0.1]:9119",
+                "Origin": "http://[::ffff:127.0.0.1]:9119",
             },
         ):
             pass

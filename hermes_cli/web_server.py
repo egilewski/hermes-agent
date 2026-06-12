@@ -67,6 +67,7 @@ from hermes_cli.memory_providers import (
     ProviderField,
     get_memory_provider,
 )
+from hermes_cli.dashboard_host import is_loopback_bind_host as _is_loopback_bind_host
 from gateway.status import (
     get_running_pid,
     get_runtime_status_running_pid,
@@ -204,6 +205,8 @@ def _get_chat_argv_lock(app: "FastAPI") -> asyncio.Lock:
 
 
 app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
+app.state.dashboard_public_insecure = False
+app.state.insecure_user_plugin_api_allowed = False
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -327,11 +330,6 @@ def _require_token(request: Request) -> None:
 # checks because the browser now considers evil.test and our dashboard
 # "same origin". Validating the Host header at the app layer rejects any
 # request whose Host isn't one we bound for. See GHSA-ppp5-vxwm-4cf7.
-_LOOPBACK_HOST_VALUES: frozenset = frozenset({
-    "localhost", "127.0.0.1", "::1",
-})
-
-
 def should_require_auth(host: str, allow_public: bool) -> bool:
     """Return True iff the dashboard OAuth auth gate must be active.
 
@@ -340,12 +338,11 @@ def should_require_auth(host: str, allow_public: bool) -> bool:
       host != loopback AND allow_public (--insecure)→ False (legacy escape hatch)
       host != loopback AND NOT allow_public         → True  (gate engages)
 
-    "Loopback" matches the same set used by ``--insecure`` enforcement in
-    ``start_server``: 127.0.0.1, localhost, ::1. RFC1918 / CGNAT / link-local
-    are deliberately treated as PUBLIC — a hostile device on the same LAN is
-    exactly the threat model the gate is designed for.
+    "Loopback" matches localhost plus IP loopback literals. RFC1918 / CGNAT /
+    link-local are deliberately treated as PUBLIC — a hostile device on the
+    same LAN is exactly the threat model the gate is designed for.
     """
-    return (host not in _LOOPBACK_HOST_VALUES) and (not allow_public)
+    return (not _is_loopback_bind_host(host)) and (not allow_public)
 
 
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
@@ -385,8 +382,8 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
 
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
-    if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+    if _is_loopback_bind_host(bound_lc):
+        return _is_loopback_bind_host(host_only)
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
@@ -1254,10 +1251,12 @@ def _path_text(raw_path: str | None) -> str:
 def _local_dashboard_request(request: Request) -> bool:
     if getattr(request.app.state, "auth_required", False):
         return False
+    bound_host = (getattr(request.app.state, "bound_host", "") or "").strip().lower()
+    if bound_host and not _is_loopback_bind_host(bound_host):
+        return False
     host = (request.url.hostname or "").lower()
-    client_host = (request.client.host if request.client else "").lower()
-    local_hosts = {"", "localhost", "127.0.0.1", "::1", "testserver", "testclient"}
-    return host in local_hosts or client_host in local_hosts
+    local_hosts = {"", "testserver", "testclient"}
+    return host in local_hosts or _is_loopback_bind_host(host)
 
 
 def _default_hermes_root_is_opt_data() -> bool:
@@ -10915,9 +10914,9 @@ else:
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-# Starlette's TestClient reports the peer as "testclient"; treat it as
-# loopback so tests don't need to rewrite request scope.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+# Starlette's TestClient reports the peer as "testclient"; keep that special
+# case so tests don't need to rewrite request scope.
+_LOOPBACK_CLIENT_HOSTS = frozenset({"testclient"})
 
 
 def _ws_client_reason(ws: "WebSocket") -> Optional[str]:
@@ -10932,12 +10931,12 @@ def _ws_client_reason(ws: "WebSocket") -> Optional[str]:
     if getattr(app.state, "auth_required", False):
         return None
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
-    if bound_host and bound_host not in _LOOPBACK_HOSTS:
+    if bound_host and not _is_loopback_bind_host(bound_host):
         return None
     client_host = ws.client.host if ws.client else ""
     if not client_host:
         return None
-    if client_host in _LOOPBACK_HOSTS:
+    if client_host in _LOOPBACK_CLIENT_HOSTS or _is_loopback_bind_host(client_host):
         return None
     return f"peer_not_loopback peer={client_host} bound={bound_host or '?'}"
 
@@ -10974,12 +10973,15 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     # an actual loopback bind; otherwise the WS handshake is rejected even
     # though same-bind HTTP requests pass _is_accepted_host.
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
-    if bound_host and bound_host not in _LOOPBACK_HOSTS:
+    if bound_host and not _is_loopback_bind_host(bound_host):
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
         return True
-    return client_host in _LOOPBACK_HOSTS
+    return (
+        client_host in _LOOPBACK_CLIENT_HOSTS
+        or _is_loopback_bind_host(client_host)
+    )
 
 
 def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
@@ -11043,7 +11045,7 @@ def _ws_auth_mode() -> str:
     if getattr(app.state, "auth_required", False):
         return "gated"
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
-    if bound_host and bound_host not in _LOOPBACK_HOSTS:
+    if bound_host and not _is_loopback_bind_host(bound_host):
         return "insecure"
     return "loopback"
 
@@ -11617,6 +11619,56 @@ def _normalise_prefix(raw: Optional[str]) -> str:
     """
     from hermes_cli.dashboard_auth.prefix import normalise_prefix
     return normalise_prefix(raw)
+
+
+def _public_insecure_dashboard_mode() -> bool:
+    """True when `hermes dashboard --host <non-loopback> --insecure` launched us."""
+    return bool(getattr(app.state, "dashboard_public_insecure", False))
+
+
+def _allow_insecure_user_plugin_api() -> bool:
+    """Return the launch-time opt-in for public-insecure user plugin APIs."""
+    return bool(getattr(app.state, "insecure_user_plugin_api_allowed", False))
+
+
+def _read_insecure_user_plugin_api_opt_in() -> bool:
+    try:
+        config = load_config()
+    except Exception:
+        return False
+    value = cfg_get(
+        config,
+        "dashboard",
+        "allow_insecure_user_plugin_api",
+        default=False,
+    )
+    return value is True
+
+
+def _snapshot_insecure_user_plugin_api_opt_in(public_insecure: bool) -> None:
+    """Capture the user plugin API opt-in before the insecure dashboard is served."""
+    app.state.dashboard_public_insecure = bool(public_insecure)
+    # Intentionally snapshotted at launch: in public-insecure mode
+    # browser-visible session tokens can mutate config, so re-reading here would
+    # let a later rescan remount user plugin Python without a dashboard restart.
+    app.state.insecure_user_plugin_api_allowed = (
+        _read_insecure_user_plugin_api_opt_in() if public_insecure else False
+    )
+
+
+def _user_plugin_api_disabled_for_public_insecure() -> bool:
+    """Return whether public insecure mode should suppress user plugin APIs."""
+    return (
+        _public_insecure_dashboard_mode()
+        and not _allow_insecure_user_plugin_api()
+    )
+
+
+def _set_public_insecure_dashboard_mode(host: str, allow_public: bool) -> bool:
+    """Persist the final public-insecure launch mode for plugin loaders."""
+    public_insecure = bool(allow_public) and not _is_loopback_bind_host(host)
+    _snapshot_insecure_user_plugin_api_opt_in(public_insecure)
+    return public_insecure
 
 
 def mount_spa(application: FastAPI):
@@ -12204,12 +12256,26 @@ def _discover_dashboard_plugins() -> list:
                 raw_api = data.get("api")
                 dashboard_dir = child / "dashboard"
                 safe_api = _safe_plugin_api_relpath(raw_api, dashboard_dir=dashboard_dir)
+                if (
+                    source == "user"
+                    and safe_api
+                    and _user_plugin_api_disabled_for_public_insecure()
+                ):
+                    _log.warning(
+                        "Plugin %s: dashboard backend api=%s disabled because "
+                        "the dashboard is running on a non-loopback host with "
+                        "--insecure. Use OAuth-gated dashboard auth or set "
+                        "dashboard.allow_insecure_user_plugin_api: true only "
+                        "for trusted plugins on trusted networks.",
+                        name, safe_api,
+                    )
+                    safe_api = None
                 if raw_api and safe_api is None:
                     _log.warning(
                         "Plugin %s: refusing unsafe api path %r (must be a "
                         "relative file inside the plugin's dashboard/ "
-                        "directory); backend routes from this plugin will "
-                        "not be mounted",
+                        "directory, or disabled for this dashboard launch); "
+                        "backend routes from this plugin will not be mounted",
                         name, raw_api,
                     )
                 plugins.append({
@@ -12607,11 +12673,71 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     )
 
 
-def _mount_plugin_api_routes():
-    """Import and mount backend API routes from plugins that declare them.
+def _spa_catch_all_route_index(routes: Optional[list] = None) -> Optional[int]:
+    route_list = app.router.routes if routes is None else routes
+    for index, route in enumerate(route_list):
+        if getattr(route, "path", None) == "/{full_path:path}":
+            return index
+    return None
+
+
+def _plugin_api_module_name(plugin_name: str) -> str:
+    return f"hermes_dashboard_plugin_{plugin_name}"
+
+
+_plugin_api_user_routes_mounted = False
+_plugin_api_user_module_names: set[str] = set()
+_plugin_api_user_prefixes: set[str] = set()
+
+
+def _remove_user_plugin_api_routes() -> None:
+    """Remove user plugin API routes from the module-global FastAPI app."""
+    global _plugin_api_user_routes_mounted
+    prefixes = tuple(_plugin_api_user_prefixes)
+    if not _plugin_api_user_routes_mounted and not prefixes:
+        return
+
+    def _keep_route(route: Any) -> bool:
+        if getattr(route, "_hermes_dashboard_plugin_api_source", None) == "user":
+            return False
+        path = str(getattr(route, "path", ""))
+        return not any(
+            path == prefix or path.startswith(f"{prefix.rstrip('/')}/")
+            for prefix in prefixes
+        )
+
+    app.router.routes = [route for route in app.router.routes if _keep_route(route)]
+    for module_name in tuple(_plugin_api_user_module_names):
+        sys.modules.pop(module_name, None)
+    _plugin_api_user_module_names.clear()
+    _plugin_api_user_prefixes.clear()
+    _plugin_api_user_routes_mounted = False
+    app.openapi_schema = None
+
+
+def _move_new_routes_before_spa(original_routes: list) -> None:
+    new_routes = app.router.routes[len(original_routes):]
+    if not new_routes:
+        return
+    catch_all_index = _spa_catch_all_route_index(original_routes)
+    if catch_all_index is None:
+        return
+    app.router.routes = [
+        *original_routes[:catch_all_index],
+        *new_routes,
+        *original_routes[catch_all_index:],
+    ]
+
+
+def _mount_plugin_api_routes(
+    *,
+    include_user: bool = True,
+    only_sources: Optional[set[str]] = None,
+) -> None:
+    """Import backend API routes from plugins that declare them.
 
     Each plugin's ``api`` field points to a Python file that must expose
-    a ``router`` (FastAPI APIRouter).  Routes are mounted under
+    a ``router`` (FastAPI APIRouter). Routes are mounted under
     ``/api/plugins/<name>/``.
 
     Backend import is restricted to ``bundled`` and ``user`` sources.
@@ -12621,15 +12747,40 @@ def _mount_plugin_api_routes():
     static JS/CSS but their Python ``api`` file is never auto-imported
     by the web server.  See GHSA-5qr3-c538-wm9j (#29156).
     """
+    global _plugin_api_user_routes_mounted
+    _remove_user_plugin_api_routes()
+    original_routes = list(app.router.routes)
+    mounted_user_routes = False
     for plugin in _get_dashboard_plugins():
+        source = plugin.get("source")
+        if only_sources is not None and source not in only_sources:
+            continue
         api_file_name = plugin.get("_api_file")
         if not api_file_name:
             continue
-        if plugin.get("source") == "project":
+        if source == "project":
             _log.warning(
                 "Plugin %s: ignoring backend api=%s (project plugins may "
                 "not auto-import Python code; move the plugin to "
                 "~/.hermes/plugins/ if you trust it)",
+                plugin["name"], api_file_name,
+            )
+            continue
+        if source == "user" and not include_user:
+            _log.debug(
+                "Plugin %s: deferring user dashboard backend api=%s until "
+                "dashboard startup finalizes host/auth mode",
+                plugin["name"], api_file_name,
+            )
+            continue
+        if (
+            source == "user"
+            and _user_plugin_api_disabled_for_public_insecure()
+        ):
+            _log.warning(
+                "Plugin %s: ignoring backend api=%s because non-loopback "
+                "--insecure dashboards do not auto-import user plugin Python "
+                "code by default",
                 plugin["name"], api_file_name,
             )
             continue
@@ -12652,8 +12803,9 @@ def _mount_plugin_api_routes():
         if not api_path.exists():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
+        module_name = _plugin_api_module_name(str(plugin["name"]))
         try:
-            module_name = f"hermes_dashboard_plugin_{plugin['name']}"
+            sys.modules.pop(module_name, None)
             spec = importlib.util.spec_from_file_location(module_name, api_path)
             if spec is None or spec.loader is None:
                 continue
@@ -12673,15 +12825,44 @@ def _mount_plugin_api_routes():
             router = getattr(mod, "router", None)
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
+                sys.modules.pop(module_name, None)
                 continue
-            app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
+            route_start = len(app.router.routes)
+            prefix = f"/api/plugins/{plugin['name']}"
+            app.include_router(router, prefix=prefix)
+            mounted_user_routes = mounted_user_routes or source == "user"
+            if source == "user":
+                for route in app.router.routes[route_start:]:
+                    setattr(route, "_hermes_dashboard_plugin_api_source", "user")
+                    setattr(route, "_hermes_dashboard_plugin_api_prefix", prefix)
+                _plugin_api_user_module_names.add(module_name)
+                _plugin_api_user_prefixes.add(prefix)
             _log.info("Mounted plugin API routes: /api/plugins/%s/", plugin["name"])
         except Exception as exc:
+            sys.modules.pop(module_name, None)
             _log.warning("Failed to load plugin %s API routes: %s", plugin["name"], exc)
+    if mounted_user_routes:
+        _plugin_api_user_routes_mounted = True
+    _move_new_routes_before_spa(original_routes)
 
 
-# Mount plugin API routes before the SPA catch-all.
-_mount_plugin_api_routes()
+def _configure_user_plugin_api_routes_for_launch(host: str, allow_public: bool) -> None:
+    """Mount user plugin APIs once the final dashboard exposure is known."""
+    _set_public_insecure_dashboard_mode(host, allow_public)
+    _get_dashboard_plugins(force_rescan=True)
+    if _user_plugin_api_disabled_for_public_insecure():
+        _remove_user_plugin_api_routes()
+    elif not _plugin_api_user_routes_mounted:
+        _mount_plugin_api_routes(include_user=True, only_sources={"user"})
+        app.openapi_schema = None
+
+
+# Import-time mounting is fail-closed for user plugins, including direct
+# module-level ``app`` imports in tests or ASGI embedding. Bundled plugin
+# backend APIs are trusted and can mount before the SPA catch-all; user plugin
+# backend APIs wait until start_server() knows whether the dashboard is
+# public-insecure.
+_mount_plugin_api_routes(include_user=False)
 
 # Mount the dashboard auth routes (/login, /auth/*, /api/auth/*) before the
 # SPA catch-all so /{full_path:path} doesn't swallow them.  These are
@@ -12765,6 +12946,8 @@ def start_server(
     """
     import uvicorn
 
+    _configure_user_plugin_api_routes_for_launch(host, allow_public)
+
     # Phase 0: stash the auth-gate flag on app.state so middleware / SPA-token
     # injection / WS-auth paths can branch on it consistently.  Phase 3.5
     # uses this to decide whether to refuse the bind, log the gate-on
@@ -12822,7 +13005,7 @@ def start_server(
             host,
             ", ".join(p.name for p in list_providers()),
         )
-    elif host not in _LOOPBACK_HOST_VALUES and allow_public:
+    elif not _is_loopback_bind_host(host) and allow_public:
         # --insecure path — no auth, loud warning.
         _log.warning(
             "Binding to %s with --insecure — the dashboard has no robust "

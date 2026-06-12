@@ -1679,6 +1679,10 @@ DEFAULT_CONFIG = {
         # Set this to True to re-enable the surfaces with the understanding
         # that the numbers are a local lower-bound estimate, not billing.
         "show_token_analytics": False,
+        # Public non-loopback ``--insecure`` dashboards suppress user-installed
+        # plugin Python APIs by default. This opt-in is for trusted lab setups
+        # only; bundled plugin APIs remain enabled either way.
+        "allow_insecure_user_plugin_api": False,
         # OAuth gate configuration (engaged when ``--host`` is set and
         # ``--insecure`` is not). The bundled Nous Portal plugin reads
         # both keys at startup; they are the canonical surface for these
