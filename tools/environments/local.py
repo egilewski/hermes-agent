@@ -98,6 +98,48 @@ _AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({
 })
 
 
+_CREDENTIAL_ENV_NAME_SUFFIXES = (
+    "_ACCESS_TOKEN",
+    "_API_KEY",
+    "_APP_KEY",
+    "_APP_TOKEN",
+    "_AUTH_TOKEN",
+    "_BOT_TOKEN",
+    "_CLIENT_STATE",
+    "_ENCRYPT_KEY",
+    "_NICKSERV_PASSWORD",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_RECOVERY_KEY",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_SERVER_PASSWORD",
+    "_SERVICE_ACCOUNT_JSON",
+    "_SSH_KEY",
+    "_TOKEN",
+)
+
+_GATEWAY_RUNTIME_CREDENTIAL_ENV_VARS = frozenset({
+    "GATEWAY_RELAY_DELIVERY_KEY",
+    "GATEWAY_RELAY_ENROLL_TOKEN",
+    "GATEWAY_RELAY_SECRET",
+    "MSGRAPH_CLIENT_SECRET",
+    "MSGRAPH_WEBHOOK_CLIENT_STATE",
+    "PHOTON_SIDECAR_TOKEN",
+    "TEAMS_GRAPH_ACCESS_TOKEN",
+    "TEAMS_INCOMING_WEBHOOK_URL",
+    "TELEGRAM_WEBHOOK_SECRET",
+    "WHATSAPP_CLOUD_ACCESS_TOKEN",
+    "WHATSAPP_CLOUD_APP_SECRET",
+    "WHATSAPP_CLOUD_VERIFY_TOKEN",
+})
+
+
+def _is_credential_env_name(name: str) -> bool:
+    """Return True for Hermes env names that carry credentials or shared secrets."""
+    return name.endswith(_CREDENTIAL_ENV_NAME_SUFFIXES)
+
+
 def _build_provider_env_blocklist() -> frozenset:
     """Derive the blocklist from provider, tool, and gateway config."""
     blocked: set[str] = set()
@@ -114,15 +156,20 @@ def _build_provider_env_blocklist() -> frozenset:
         pass
 
     try:
-        from hermes_cli.config import OPTIONAL_ENV_VARS
+        from hermes_cli.config import OPTIONAL_ENV_VARS, _EXTRA_ENV_KEYS
         for name, metadata in OPTIONAL_ENV_VARS.items():
             category = metadata.get("category")
             if category in {"tool", "messaging"}:
                 blocked.add(name)
             elif category == "setting" and metadata.get("password"):
                 blocked.add(name)
+        blocked.update(
+            name for name in _EXTRA_ENV_KEYS if _is_credential_env_name(name)
+        )
     except ImportError:
         pass
+
+    blocked.update(_GATEWAY_RUNTIME_CREDENTIAL_ENV_VARS)
 
     blocked.update({
         "OPENAI_BASE_URL",
@@ -178,7 +225,31 @@ def _build_provider_env_blocklist() -> frozenset:
         "EMAIL_HOME_ADDRESS",
         "EMAIL_HOME_ADDRESS_NAME",
         "HERMES_DASHBOARD_SESSION_TOKEN",
+        "MATRIX_PASSWORD",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "TWILIO_PHONE_NUMBER",
+        "TWILIO_PHONE_NUMBER_SID",
         "GATEWAY_ALLOWED_USERS",
+        "DINGTALK_CLIENT_ID",
+        "DINGTALK_CLIENT_SECRET",
+        "FEISHU_APP_ID",
+        "FEISHU_APP_SECRET",
+        "FEISHU_ENCRYPT_KEY",
+        "FEISHU_VERIFICATION_TOKEN",
+        "WECOM_BOT_ID",
+        "WECOM_SECRET",
+        "WECOM_CALLBACK_CORP_ID",
+        "WECOM_CALLBACK_CORP_SECRET",
+        "WECOM_CALLBACK_AGENT_ID",
+        "WECOM_CALLBACK_TOKEN",
+        "WECOM_CALLBACK_ENCODING_AES_KEY",
+        "WEIXIN_TOKEN",
+        "WEIXIN_ACCOUNT_ID",
+        "YUANBAO_APP_ID",
+        "YUANBAO_APP_KEY",
+        "YUANBAO_APP_SECRET",
+        "YUANBAO_BOT_ID",
         "GH_TOKEN",
         "GITHUB_APP_ID",
         "GITHUB_APP_PRIVATE_KEY_PATH",

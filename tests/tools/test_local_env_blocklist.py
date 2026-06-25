@@ -18,6 +18,8 @@ from tools.environments.local import (
     LocalEnvironment,
     _HERMES_PROVIDER_ENV_BLOCKLIST,
     _HERMES_PROVIDER_ENV_FORCE_PREFIX,
+    _GATEWAY_RUNTIME_CREDENTIAL_ENV_VARS,
+    _is_credential_env_name,
 )
 
 
@@ -177,10 +179,31 @@ class TestProviderEnvBlocklist:
             "SIGNAL_ACCOUNT": "+15555550124",
             "HASS_TOKEN": "ha-secret",
             "EMAIL_PASSWORD": "email-secret",
+            "MATRIX_PASSWORD": "matrix-secret",
+            "TWILIO_ACCOUNT_SID": "twilio-sid",
+            "TWILIO_AUTH_TOKEN": "twilio-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
             "HERMES_DASHBOARD_SESSION_TOKEN": "dashboard-session-secret",
             "BROWSERBASE_PROJECT_ID": "bb-project",
             "ELEVENLABS_API_KEY": "el-secret",
+            "DINGTALK_CLIENT_SECRET": "dingtalk-secret",
+            "FEISHU_APP_SECRET": "feishu-secret",
+            "GATEWAY_RELAY_DELIVERY_KEY": "relay-delivery-key",
+            "GATEWAY_RELAY_SECRET": "relay-secret",
+            "GATEWAY_RELAY_ENROLL_TOKEN": "relay-enroll-token",
+            "MSGRAPH_CLIENT_SECRET": "msgraph-client-secret",
+            "MSGRAPH_WEBHOOK_CLIENT_STATE": "msgraph-client-state",
+            "PHOTON_SIDECAR_TOKEN": "photon-sidecar-token",
+            "TEAMS_GRAPH_ACCESS_TOKEN": "teams-graph-token",
+            "TEAMS_INCOMING_WEBHOOK_URL": "https://example.webhook.office.com/secret",
+            "TELEGRAM_WEBHOOK_SECRET": "telegram-webhook-secret",
+            "WECOM_SECRET": "wecom-secret",
+            "WECOM_CALLBACK_CORP_SECRET": "wecom-corp-secret",
+            "WEIXIN_TOKEN": "weixin-token",
+            "WHATSAPP_CLOUD_ACCESS_TOKEN": "whatsapp-cloud-token",
+            "WHATSAPP_CLOUD_APP_SECRET": "whatsapp-cloud-secret",
+            "WHATSAPP_CLOUD_VERIFY_TOKEN": "whatsapp-cloud-verify",
+            "YUANBAO_APP_SECRET": "yuanbao-secret",
             "GITHUB_TOKEN": "ghp_secret",
             "GH_TOKEN": "gh_alias_secret",
             "GATEWAY_ALLOW_ALL_USERS": "true",
@@ -335,10 +358,30 @@ class TestBlocklistCoverage:
                     f"Secret setting env var {name} missing from blocklist"
                 )
 
+    def test_secret_extra_env_keys_are_in_blocklist(self):
+        """Secret-shaped config extras should stay covered even when they are
+        not listed in user-facing OPTIONAL_ENV_VARS."""
+        from hermes_cli.config import _EXTRA_ENV_KEYS
+
+        credential_extras = {
+            name for name in _EXTRA_ENV_KEYS if _is_credential_env_name(name)
+        }
+        assert credential_extras, "expected at least one credential-shaped extra env key"
+        missing = {
+            name for name in credential_extras
+            if name not in _HERMES_PROVIDER_ENV_BLOCKLIST
+        }
+        assert not missing
+
+    def test_credential_env_name_helper_covers_app_keys(self):
+        assert _is_credential_env_name("EXAMPLE_APP_KEY")
+        assert not _is_credential_env_name("EXAMPLE_CLIENT_ID")
+
     def test_gateway_runtime_vars_are_in_blocklist(self):
         extras = {
             "TELEGRAM_HOME_CHANNEL",
             "TELEGRAM_HOME_CHANNEL_NAME",
+            "TELEGRAM_WEBHOOK_SECRET",
             "DISCORD_HOME_CHANNEL",
             "DISCORD_HOME_CHANNEL_NAME",
             "DISCORD_REQUIRE_MENTION",
@@ -366,7 +409,42 @@ class TestBlocklistCoverage:
             "EMAIL_HOME_ADDRESS",
             "EMAIL_HOME_ADDRESS_NAME",
             "HERMES_DASHBOARD_SESSION_TOKEN",
+            "MATRIX_PASSWORD",
+            "TWILIO_ACCOUNT_SID",
+            "TWILIO_AUTH_TOKEN",
+            "TWILIO_PHONE_NUMBER",
+            "TWILIO_PHONE_NUMBER_SID",
             "GATEWAY_ALLOWED_USERS",
+            "GATEWAY_RELAY_DELIVERY_KEY",
+            "GATEWAY_RELAY_ENROLL_TOKEN",
+            "GATEWAY_RELAY_SECRET",
+            "MSGRAPH_CLIENT_SECRET",
+            "MSGRAPH_WEBHOOK_CLIENT_STATE",
+            "PHOTON_SIDECAR_TOKEN",
+            "TEAMS_GRAPH_ACCESS_TOKEN",
+            "TEAMS_INCOMING_WEBHOOK_URL",
+            "DINGTALK_CLIENT_ID",
+            "DINGTALK_CLIENT_SECRET",
+            "FEISHU_APP_ID",
+            "FEISHU_APP_SECRET",
+            "FEISHU_ENCRYPT_KEY",
+            "FEISHU_VERIFICATION_TOKEN",
+            "WECOM_BOT_ID",
+            "WECOM_SECRET",
+            "WECOM_CALLBACK_CORP_ID",
+            "WECOM_CALLBACK_CORP_SECRET",
+            "WECOM_CALLBACK_AGENT_ID",
+            "WECOM_CALLBACK_TOKEN",
+            "WECOM_CALLBACK_ENCODING_AES_KEY",
+            "WEIXIN_TOKEN",
+            "WEIXIN_ACCOUNT_ID",
+            "YUANBAO_APP_ID",
+            "YUANBAO_APP_KEY",
+            "YUANBAO_APP_SECRET",
+            "YUANBAO_BOT_ID",
+            "WHATSAPP_CLOUD_ACCESS_TOKEN",
+            "WHATSAPP_CLOUD_APP_SECRET",
+            "WHATSAPP_CLOUD_VERIFY_TOKEN",
             "GH_TOKEN",
             "GITHUB_APP_ID",
             "GITHUB_APP_PRIVATE_KEY_PATH",
@@ -376,6 +454,121 @@ class TestBlocklistCoverage:
             "DAYTONA_API_KEY",
         }
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+    def test_gateway_ghsa_m4m8_xjp4_5rmm_credentials_are_stripped_from_all_local_env_paths(self):
+        """GHSA-m4m8-xjp4-5rmm: gateway credentials must not leak to subprocesses."""
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        secrets = {
+            "DINGTALK_CLIENT_SECRET": "dingtalk-secret",
+            "FEISHU_APP_SECRET": "feishu-secret",
+            "FEISHU_ENCRYPT_KEY": "feishu-encrypt-key",
+            "FEISHU_VERIFICATION_TOKEN": "feishu-verification-token",
+            "GATEWAY_RELAY_DELIVERY_KEY": "relay-delivery-key",
+            "GATEWAY_RELAY_ENROLL_TOKEN": "relay-enroll-token",
+            "GATEWAY_RELAY_SECRET": "relay-secret",
+            "MATRIX_PASSWORD": "matrix-password",
+            "MSGRAPH_CLIENT_SECRET": "msgraph-client-secret",
+            "MSGRAPH_WEBHOOK_CLIENT_STATE": "msgraph-client-state",
+            "PHOTON_SIDECAR_TOKEN": "photon-sidecar-token",
+            "TEAMS_GRAPH_ACCESS_TOKEN": "teams-graph-token",
+            "TEAMS_INCOMING_WEBHOOK_URL": "https://example.webhook.office.com/secret",
+            "TELEGRAM_WEBHOOK_SECRET": "telegram-webhook-secret",
+            "TWILIO_AUTH_TOKEN": "twilio-auth-token",
+            "WECOM_CALLBACK_CORP_SECRET": "wecom-callback-secret",
+            "WECOM_CALLBACK_TOKEN": "wecom-callback-token",
+            "WECOM_CALLBACK_ENCODING_AES_KEY": "wecom-callback-aes-key",
+            "WECOM_SECRET": "wecom-secret",
+            "WEIXIN_TOKEN": "weixin-token",
+            "WHATSAPP_CLOUD_ACCESS_TOKEN": "whatsapp-cloud-token",
+            "WHATSAPP_CLOUD_APP_SECRET": "whatsapp-cloud-secret",
+            "WHATSAPP_CLOUD_VERIFY_TOKEN": "whatsapp-cloud-verify",
+            "YUANBAO_APP_SECRET": "yuanbao-secret",
+        }
+
+        with patch.dict(os.environ, secrets | {"PATH": "/usr/bin:/bin"}, clear=True):
+            run_env = _make_run_env({})
+        bg_env = _sanitize_subprocess_env(secrets | {"PATH": "/usr/bin:/bin"})
+
+        for env_name in secrets:
+            assert env_name not in run_env, f"{env_name} leaked through _make_run_env"
+            assert env_name not in bg_env, (
+                f"{env_name} leaked through _sanitize_subprocess_env"
+            )
+
+    def test_gateway_runtime_credential_set_is_stripped_from_all_local_env_paths(self):
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        secrets = {
+            name: f"secret-{index}"
+            for index, name in enumerate(_GATEWAY_RUNTIME_CREDENTIAL_ENV_VARS)
+        }
+        assert secrets, "_GATEWAY_RUNTIME_CREDENTIAL_ENV_VARS must not be empty"
+
+        with patch.dict(os.environ, secrets | {"PATH": "/usr/bin:/bin"}, clear=True):
+            run_env = _make_run_env({})
+        bg_env = _sanitize_subprocess_env(secrets | {"PATH": "/usr/bin:/bin"})
+
+        for env_name in secrets:
+            assert env_name not in run_env, f"{env_name} leaked through _make_run_env"
+            assert env_name not in bg_env, (
+                f"{env_name} leaked through _sanitize_subprocess_env"
+            )
+
+    def test_teams_runtime_credentials_are_stripped_from_all_local_env_paths(self):
+        """Teams delivery credentials are read from process env but must not leak."""
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        secrets = {
+            "TEAMS_CLIENT_SECRET": "teams-client-secret",
+            "TEAMS_GRAPH_ACCESS_TOKEN": "teams-graph-token",
+            "TEAMS_INCOMING_WEBHOOK_URL": "https://example.webhook.office.com/secret",
+        }
+
+        with patch.dict(os.environ, secrets | {"PATH": "/usr/bin:/bin"}, clear=True):
+            run_env = _make_run_env({})
+        bg_env = _sanitize_subprocess_env(secrets | {"PATH": "/usr/bin:/bin"})
+
+        for env_name in secrets:
+            assert env_name not in run_env, f"{env_name} leaked through _make_run_env"
+            assert env_name not in bg_env, (
+                f"{env_name} leaked through _sanitize_subprocess_env"
+            )
+
+    def test_runtime_non_secret_gateway_vars_are_preserved(self):
+        """Runtime-only gateway knobs should not be swept up by secret suffixes."""
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        operational = {
+            "GATEWAY_RELAY_URL": "wss://connector.example/relay",
+            "GATEWAY_RELAY_ID": "gw-example",
+            "GATEWAY_RELAY_PLATFORM": "relay",
+            "GATEWAY_RELAY_ROUTE_KEYS": "tenant-a,tenant-b",
+            "MSGRAPH_AUTHORITY_URL": "https://login.microsoftonline.com",
+            "MSGRAPH_CLIENT_ID": "client-123",
+            "MSGRAPH_SCOPE": "https://graph.microsoft.com/.default",
+            "MSGRAPH_TENANT_ID": "tenant-123",
+            "MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES": "communications/onlineMeetings",
+            "MSGRAPH_WEBHOOK_ALLOWED_SOURCE_CIDRS": "52.96.0.0/14",
+            "MSGRAPH_WEBHOOK_PORT": "8646",
+            "MSGRAPH_WEBHOOK_STORE_PATH": "/tmp/hermes-msgraph.sqlite3",
+            "TEAMS_CHANNEL_ID": "channel-123",
+            "TEAMS_CHAT_ID": "chat-123",
+            "TEAMS_DELIVERY_MODE": "graph",
+            "TEAMS_SERVICE_URL": "https://smba.trafficmanager.net/teams/",
+            "TEAMS_TEAM_ID": "team-123",
+            "TELEGRAM_WEBHOOK_URL": "https://example.com/telegram",
+            "WHATSAPP_CLOUD_PHONE_NUMBER_ID": "7794189252778687",
+            "WHATSAPP_CLOUD_WEBHOOK_PORT": "8090",
+        }
+
+        with patch.dict(os.environ, operational | {"PATH": "/usr/bin:/bin"}, clear=True):
+            run_env = _make_run_env({})
+        bg_env = _sanitize_subprocess_env(operational | {"PATH": "/usr/bin:/bin"})
+
+        for env_name, value in operational.items():
+            assert run_env.get(env_name) == value
+            assert bg_env.get(env_name) == value
 
 
 class TestSanePathIncludesHomebrew:
