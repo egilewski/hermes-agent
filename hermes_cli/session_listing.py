@@ -37,6 +37,8 @@ def query_session_listing(
     session_db: Any,
     *,
     source: str | None,
+    user_id: str | None = None,
+    filter_user_id: bool = False,
     current_session_id: str | None = None,
     include_all_sources: bool = False,
     include_unnamed: bool = False,
@@ -53,6 +55,8 @@ def query_session_listing(
     fetch_limit = max(limit * 4, limit)
     rows = session_db.list_sessions_rich(
         source=query_source,
+        user_id=user_id,
+        filter_user_id=filter_user_id,
         exclude_sources=exclude_sources,
         limit=fetch_limit,
     )

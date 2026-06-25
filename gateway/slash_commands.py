@@ -3123,10 +3123,48 @@ class GatewaySlashCommandsMixin:
         ):
             name = name[1:-1].strip()
 
+        user_source = source.platform.value if source.platform else None
+        user_id = source.user_id
+
+        def _row_matches_resume_scope(session: dict | None) -> bool:
+            if not session:
+                return False
+            if user_source and session.get("source") != user_source:
+                return False
+            return session.get("user_id") == user_id
+
+        def _session_in_resume_scope(session: dict | None) -> bool:
+            if not _row_matches_resume_scope(session):
+                return False
+
+            current = session
+            seen: set[str] = set()
+            while current and current.get("parent_session_id"):
+                current_id = str(current.get("id") or "")
+                if current_id in seen:
+                    return False
+                seen.add(current_id)
+                parent_id = str(current.get("parent_session_id") or "")
+                parent = self._session_db.get_session(parent_id)
+                if not parent or parent.get("end_reason") != "compression":
+                    break
+                if not _row_matches_resume_scope(parent):
+                    return False
+                current = parent
+            return True
+
         def _list_titled_sessions() -> list[dict]:
-            user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
-            return [s for s in sessions if s.get("title")][:10]
+            sessions = self._session_db.list_sessions_rich(
+                source=user_source,
+                user_id=user_id,
+                filter_user_id=True,
+                limit=40,
+            )
+            return [
+                s
+                for s in sessions
+                if s.get("title") and _session_in_resume_scope(s)
+            ][:10]
 
         if not name:
             # List recent titled sessions for this user/platform
@@ -3183,18 +3221,30 @@ class GatewaySlashCommandsMixin:
             # Try direct session ID lookup first (so `/resume <session_id>`
             # works in the gateway, not just `/resume <title>`).
             session = self._session_db.get_session(name)
-            if session:
+            if session and _session_in_resume_scope(session):
                 target_id = session["id"]
             else:
-                target_id = self._session_db.resolve_session_by_title(name)
+                target_id = self._session_db.resolve_session_by_title(
+                    name,
+                    source=user_source,
+                    user_id=user_id,
+                    filter_user_id=True,
+                )
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
+        original_target_id = target_id
         try:
             target_id = self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
+        if target_id == original_target_id:
+            target_session = self._session_db.get_session(original_target_id)
+            if target_session and target_session.get("end_reason") == "compression":
+                return t("gateway.resume.not_found", name=name)
+        if not _session_in_resume_scope(self._session_db.get_session(target_id)):
+            return t("gateway.resume.not_found", name=name)
 
         if source.platform == Platform.MATRIX:
             target_origin = self._gateway_session_origin_for_id(target_id)
@@ -3276,6 +3326,8 @@ class GatewaySlashCommandsMixin:
         rows = query_session_listing(
             self._session_db,
             source=source.platform.value if source.platform else None,
+            user_id=source.user_id,
+            filter_user_id=True,
             current_session_id=current_entry.session_id,
             include_all_sources=include_all,
             include_unnamed=include_unnamed,
@@ -3345,6 +3397,7 @@ class GatewaySlashCommandsMixin:
             self._session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
+                user_id=source.user_id,
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
                 model_config={"_branched_from": parent_session_id},
                 parent_session_id=parent_session_id,

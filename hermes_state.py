@@ -33,6 +33,16 @@ def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
 
 
+def _compression_edge_sql(parent_alias: str = "parent", child_alias: str = "child") -> str:
+    return (
+        f"{parent_alias}.end_reason = 'compression'"
+        f" AND {child_alias}.started_at >= {parent_alias}.ended_at"
+        f" AND {child_alias}.source = {parent_alias}.source"
+        f" AND ({child_alias}.user_id = {parent_alias}.user_id"
+        f" OR ({child_alias}.user_id IS NULL AND {parent_alias}.user_id IS NULL))"
+    )
+
+
 # A child session counts as a /branch (kept visible, never cascade-deleted) if
 # it carries the stable marker OR the legacy end_reason heuristic holds.
 _BRANCH_CHILD_SQL = (
@@ -46,8 +56,7 @@ _BRANCH_CHILD_SQL = (
 _COMPRESSION_CHILD_SQL = (
     "EXISTS (SELECT 1 FROM sessions p"
     "        WHERE p.id = {a}.parent_session_id"
-    "        AND p.end_reason = 'compression'"
-    "        AND {a}.started_at >= p.ended_at)"
+    f"        AND {_compression_edge_sql('p', '{a}')})"
 )
 
 # Rows that surface in pickers: roots + branch children (subagent runs and
@@ -1865,7 +1874,7 @@ class SessionDB:
             return False
         # Walk parent links up from the descendant, following only compression
         # continuation edges, and check whether ancestor_id is reached.
-        edge = _COMPRESSION_CHILD_SQL.format(a="child")
+        edge = _compression_edge_sql("parent", "child")
         row = conn.execute(
             f"""
             WITH RECURSIVE ancestors(id) AS (
@@ -1952,8 +1961,9 @@ class SessionDB:
         Returns True when at least one row was updated.
         """
         def _do(conn):
+            edge = _compression_edge_sql("parent", "child")
             cursor = conn.execute(
-                """
+                f"""
                 WITH RECURSIVE
                   ancestors(id) AS (
                     SELECT ?
@@ -1962,8 +1972,7 @@ class SessionDB:
                     FROM ancestors a
                     JOIN sessions child ON child.id = a.id
                     JOIN sessions parent ON parent.id = child.parent_session_id
-                    WHERE parent.end_reason = 'compression'
-                      AND child.started_at >= parent.ended_at
+                    WHERE {edge}
                   ),
                   descendants(id) AS (
                     SELECT ?
@@ -1972,8 +1981,7 @@ class SessionDB:
                     FROM descendants d
                     JOIN sessions parent ON parent.id = d.id
                     JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.end_reason = 'compression'
-                      AND child.started_at >= parent.ended_at
+                    WHERE {edge}
                   ),
                   lineage(id) AS (
                     SELECT id FROM ancestors
@@ -1993,16 +2001,37 @@ class SessionDB:
         rowcount = self._execute_write(_do)
         return rowcount > 0
 
-    def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
+    def get_session_by_title(
+        self,
+        title: str,
+        source: str = None,
+        user_id: str = None,
+        filter_user_id: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
+        where_clauses = ["title = ?"]
+        params = [title]
+        if source:
+            where_clauses.append("source = ?")
+            params.append(source)
+        if filter_user_id and user_id is None:
+            where_clauses.append("user_id IS NULL")
+        elif user_id is not None:
+            where_clauses.append("user_id = ?")
+            params.append(user_id)
+        query = f"SELECT * FROM sessions WHERE {' AND '.join(where_clauses)}"
         with self._lock:
-            cursor = self._conn.execute(
-                "SELECT * FROM sessions WHERE title = ?", (title,)
-            )
+            cursor = self._conn.execute(query, params)
             row = cursor.fetchone()
         return dict(row) if row else None
 
-    def resolve_session_by_title(self, title: str) -> Optional[str]:
+    def resolve_session_by_title(
+        self,
+        title: str,
+        source: str = None,
+        user_id: str = None,
+        filter_user_id: bool = False,
+    ) -> Optional[str]:
         """Resolve a title to a session ID, preferring the latest in a lineage.
 
         If the exact title exists, returns that session's ID.
@@ -2011,17 +2040,33 @@ class SessionDB:
         latest numbered variant (the most recent continuation).
         """
         # First try exact match
-        exact = self.get_session_by_title(title)
+        exact = self.get_session_by_title(
+            title,
+            source=source,
+            user_id=user_id,
+            filter_user_id=filter_user_id,
+        )
 
         # Also search for numbered variants: "title #2", "title #3", etc.
         # Escape SQL LIKE wildcards (%, _) in the title to prevent false matches
         escaped = title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where_clauses = ["title LIKE ? ESCAPE '\\'"]
+        params = [f"{escaped} #%"]
+        if source:
+            where_clauses.append("source = ?")
+            params.append(source)
+        if filter_user_id and user_id is None:
+            where_clauses.append("user_id IS NULL")
+        elif user_id is not None:
+            where_clauses.append("user_id = ?")
+            params.append(user_id)
+        query = (
+            "SELECT id, title, started_at FROM sessions "
+            f"WHERE {' AND '.join(where_clauses)} "
+            "ORDER BY started_at DESC"
+        )
         with self._lock:
-            cursor = self._conn.execute(
-                "SELECT id, title, started_at FROM sessions "
-                "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
-                (f"{escaped} #%",),
-            )
+            cursor = self._conn.execute(query, params)
             numbered = cursor.fetchall()
 
         if numbered:
@@ -2072,10 +2117,13 @@ class SessionDB:
         A compression continuation is a child session where:
         1. The parent's ``end_reason = 'compression'``
         2. The child was created AFTER the parent was ended (started_at >= ended_at)
+        3. The child preserves the parent's ``source`` and ``user_id``
 
         The second condition distinguishes compression continuations from
         delegate subagents or branch children, which can also have a
         ``parent_session_id`` but were created while the parent was still live.
+        The third condition keeps cross-source and cross-user children from
+        being projected into another conversation's compression lineage.
 
         Returns the session_id of the latest continuation in the chain, or the
         input ``session_id`` if it isn't part of a compression chain (or if the
@@ -2086,15 +2134,15 @@ class SessionDB:
         # pathological and shouldn't happen in practice. 100 = plenty.
         for _ in range(100):
             with self._lock:
+                edge = _compression_edge_sql("parent", "child")
                 cursor = self._conn.execute(
-                    "SELECT id FROM sessions "
-                    "WHERE parent_session_id = ? "
-                    "  AND started_at >= ("
-                    "      SELECT ended_at FROM sessions "
-                    "      WHERE id = ? AND end_reason = 'compression'"
-                    "  ) "
-                    "ORDER BY started_at DESC LIMIT 1",
-                    (current, current),
+                    f"SELECT child.id "
+                    f"FROM sessions parent "
+                    f"JOIN sessions child ON child.parent_session_id = parent.id "
+                    f"WHERE parent.id = ? "
+                    f"  AND {edge} "
+                    f"ORDER BY child.started_at DESC LIMIT 1",
+                    (current,),
                 )
                 row = cursor.fetchone()
             if row is None:
@@ -2106,6 +2154,8 @@ class SessionDB:
         self,
         source: str = None,
         exclude_sources: List[str] = None,
+        user_id: str = None,
+        filter_user_id: bool = False,
         limit: int = 20,
         offset: int = 0,
         include_children: bool = False,
@@ -2167,6 +2217,11 @@ class SessionDB:
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
+        if filter_user_id and user_id is None:
+            where_clauses.append("s.user_id IS NULL")
+        elif user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if exclude_sources:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
@@ -2232,8 +2287,7 @@ class SessionDB:
                     FROM chain c
                     JOIN sessions parent ON parent.id = c.cur_id
                     JOIN sessions child ON child.parent_session_id = c.cur_id
-                    WHERE parent.end_reason = 'compression'
-                      AND child.started_at >= parent.ended_at
+                    WHERE {_compression_edge_sql("parent", "child")}
                 ),
                 chain_max AS (
                     SELECT
@@ -2322,6 +2376,12 @@ class SessionDB:
                     continue
                 tip_row = self._get_session_rich_row(tip_id)
                 if not tip_row:
+                    projected.append(s)
+                    continue
+                if (
+                    tip_row.get("source") != s.get("source")
+                    or tip_row.get("user_id") != s.get("user_id")
+                ):
                     projected.append(s)
                     continue
                 # Preserve the root's started_at for stable sort order, but
@@ -3001,10 +3061,14 @@ class SessionDB:
         ``message_count = 0`` rows unless messages had already been flushed to
         it before compression. See #15000.
 
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
+        This helper follows strict compression continuations first so a
+        compressed parent redirects to its live tip even when the parent still
+        has flushed messages. If that tip has no messages, the legacy empty-head
+        fallback then walks ``parent_session_id`` forward within the same
+        source/user scope and returns the first descendant in the chain that has
+        at least one message row. If the original session already has messages,
+        or no descendant has any, the original ``session_id`` is returned
+        unchanged.
 
         The chain is always walked via the child whose ``started_at`` is
         latest; that matches the single-chain shape that compression creates.
@@ -3043,16 +3107,26 @@ class SessionDB:
             if row is not None:
                 return session_id
 
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
+            # Legacy empty-head fallback: older generic/compression-like chains
+            # were not always marked end_reason='compression', so keep walking
+            # descendants after the strict compression-tip fast path. Scope the
+            # walk to the same source and exact/null-equal user_id to avoid
+            # crossing platform or user boundaries.
             current = session_id
             seen = {current}
             for _ in range(32):
                 try:
                     child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
-                        "WHERE parent_session_id = ? "
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                        f"SELECT child.id "
+                        f"FROM sessions parent "
+                        f"JOIN sessions child ON child.parent_session_id = parent.id "
+                        f"WHERE parent.id = ? "
+                        f"  AND child.source = parent.source "
+                        f"  AND ("
+                        f"      child.user_id = parent.user_id "
+                        f"      OR (child.user_id IS NULL AND parent.user_id IS NULL)"
+                        f"  ) "
+                        f"ORDER BY child.started_at DESC, child.id DESC LIMIT 1",
                         (current,),
                     ).fetchone()
                 except Exception:
@@ -3179,12 +3253,25 @@ class SessionDB:
                 seen.add(current)
                 chain.append(current)
                 row = self._conn.execute(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    f"SELECT parent.id "
+                    f"FROM sessions child "
+                    f"JOIN sessions parent ON parent.id = child.parent_session_id "
+                    f"WHERE child.id = ? "
+                    f"  AND parent.source = child.source "
+                    f"  AND ("
+                    f"      child.user_id = parent.user_id "
+                    f"      OR (child.user_id IS NULL AND parent.user_id IS NULL)"
+                    f"  ) "
+                    f"  AND ("
+                    f"      parent.end_reason IS NULL "
+                    f"      OR parent.end_reason != 'compression' "
+                    f"      OR ({_compression_edge_sql('parent', 'child')})"
+                    f"  )",
                     (current,),
                 ).fetchone()
                 if row is None:
                     break
-                current = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+                current = row["id"] if hasattr(row, "keys") else row[0]
         return list(reversed(chain)) or [session_id]
 
     @staticmethod
@@ -3874,6 +3961,8 @@ class SessionDB:
     def session_count(
         self,
         source: str = None,
+        user_id: str = None,
+        filter_user_id: bool = False,
         min_message_count: int = 0,
         include_archived: bool = False,
         archived_only: bool = False,
@@ -3906,6 +3995,11 @@ class SessionDB:
         if source:
             where_clauses.append("s.source = ?")
             params.append(source)
+        if filter_user_id and user_id is None:
+            where_clauses.append("s.user_id IS NULL")
+        elif user_id is not None:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
         if exclude_sources:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")

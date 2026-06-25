@@ -344,15 +344,24 @@ def _make_runner(current_source: SessionSource, entries: list[SessionEntry]):
     runner._evict_cached_agent = MagicMock()
     runner._queue_depth = MagicMock(return_value=0)
     runner._session_db = MagicMock()
-    runner._session_db.list_sessions_rich.return_value = [
-        {"id": entry.session_id, "title": entry.display_name, "preview": ""}
+    rows_by_id = {
+        entry.session_id: {
+            "id": entry.session_id,
+            "title": entry.display_name,
+            "preview": "",
+            "source": entry.platform.value,
+            "user_id": entry.origin.user_id if entry.origin else None,
+            "parent_session_id": None,
+            "end_reason": None,
+        }
         for entry in entries
-    ]
+    }
+    runner._session_db.list_sessions_rich.return_value = list(rows_by_id.values())
     runner._session_db.resolve_resume_session_id.side_effect = lambda sid: sid
     runner._session_db.get_session_title.side_effect = lambda sid: {
         entry.session_id: entry.display_name for entry in entries
     }.get(sid)
-    runner._session_db.get_session.return_value = None
+    runner._session_db.get_session.side_effect = lambda sid: rows_by_id.get(sid)
     return runner
 
 
@@ -430,7 +439,12 @@ async def test_matrix_resume_quoted_title_same_room():
     )
 
     assert "Resumed session" in result
-    runner._session_db.resolve_session_by_title.assert_called_once_with("Project B Plan")
+    runner._session_db.resolve_session_by_title.assert_called_once_with(
+        "Project B Plan",
+        source="matrix",
+        user_id=SENDER,
+        filter_user_id=True,
+    )
 
 
 @pytest.mark.asyncio

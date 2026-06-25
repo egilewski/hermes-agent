@@ -24,7 +24,12 @@ from unittest.mock import MagicMock, patch
 from hermes_state import SessionDB
 
 
-def _build_agent_with_db(db: SessionDB, session_id: str, platform: str = "telegram"):
+def _build_agent_with_db(
+    db: SessionDB,
+    session_id: str,
+    platform: str = "telegram",
+    user_id: str | None = None,
+):
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         from run_agent import AIAgent
 
@@ -33,6 +38,7 @@ def _build_agent_with_db(db: SessionDB, session_id: str, platform: str = "telegr
             base_url="https://openrouter.ai/api/v1",
             model="test/model",
             platform=platform,
+            user_id=user_id,
             quiet_mode=True,
             session_db=db,
             session_id=session_id,
@@ -127,3 +133,20 @@ class TestPlatformForwardedAtBoundary:
         kwargs = calls[-1].kwargs
         assert kwargs.get("platform") == "telegram"
         assert kwargs.get("boundary_reason") == "compression"
+
+
+class TestUserScopeForwardedAtBoundary:
+    def test_compression_child_inherits_gateway_user_id(self, tmp_path: Path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        parent = "PARENT_USER_SCOPE_ROT"
+        db.create_session(parent, source="telegram", user_id="u1")
+        agent = _build_agent_with_db(db, parent, platform="telegram", user_id="u1")
+
+        agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
+
+        assert agent.session_id != parent
+        child = db.get_session(agent.session_id)
+        assert child is not None
+        assert child["parent_session_id"] == parent
+        assert child["source"] == "telegram"
+        assert child["user_id"] == "u1"

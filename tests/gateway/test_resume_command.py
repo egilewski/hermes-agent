@@ -59,6 +59,70 @@ def _make_runner(session_db=None, current_session_id="current_session_001",
     return runner
 
 
+def _create_cross_user_compression_tip(db):
+    """Create u1 root -> u2 tip to reproduce unsafe metadata projection."""
+    import time as _time
+
+    t0 = _time.time() - 3600
+    db.create_session("u1_root", "telegram", user_id="12345")
+    db.set_session_title("u1_root", "Root Safe Title")
+    db.append_message("u1_root", "user", "root safe preview")
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+        (t0, t0 + 10, "compression", "u1_root"),
+    )
+    db.create_session(
+        "u2_tip",
+        "telegram",
+        user_id="99999",
+        parent_session_id="u1_root",
+    )
+    db.set_session_title("u2_tip", "Other Tip Title")
+    db.append_message("u2_tip", "user", "other tip secret preview")
+    db._conn.execute(
+        "UPDATE sessions SET started_at=? WHERE id=?",
+        (t0 + 11, "u2_tip"),
+    )
+    db._conn.commit()
+
+
+def _create_cross_user_rejoined_compression_tip(db):
+    """Create u1 root -> u2 mid -> u1 tip to reproduce rejoined-tip projection."""
+    import time as _time
+
+    t0 = _time.time() - 3600
+    db.create_session("u1_root", "telegram", user_id="12345")
+    db.set_session_title("u1_root", "Root Safe Title")
+    db.append_message("u1_root", "user", "root safe preview")
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+        (t0, t0 + 10, "compression", "u1_root"),
+    )
+    db.create_session(
+        "u2_mid",
+        "telegram",
+        user_id="99999",
+        parent_session_id="u1_root",
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+        (t0 + 11, t0 + 20, "compression", "u2_mid"),
+    )
+    db.create_session(
+        "u1_tip",
+        "telegram",
+        user_id="12345",
+        parent_session_id="u2_mid",
+    )
+    db.set_session_title("u1_tip", "Rejoined Tip Title")
+    db.append_message("u1_tip", "user", "rejoined tip preview")
+    db._conn.execute(
+        "UPDATE sessions SET started_at=? WHERE id=?",
+        (t0 + 21, "u1_tip"),
+    )
+    db._conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # _handle_resume_command
 # ---------------------------------------------------------------------------
@@ -80,8 +144,8 @@ class TestHandleResumeCommand:
         """With no argument, lists recently titled sessions."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")
-        db.create_session("sess_002", "telegram")
+        db.create_session("sess_001", "telegram", user_id="12345")
+        db.create_session("sess_002", "telegram", user_id="12345")
         db.set_session_title("sess_001", "Research")
         db.set_session_title("sess_002", "Coding")
 
@@ -97,11 +161,67 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_list_named_sessions_scoped_to_user_id(self, tmp_path):
+        """With no argument, only lists titles owned by the requesting user."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("own_session", "telegram", user_id="12345")
+        db.create_session("other_session", "telegram", user_id="99999")
+        db.set_session_title("own_session", "Own Work")
+        db.set_session_title("other_session", "Other Work")
+
+        event = _make_event(text="/resume")
+        runner = _make_runner(session_db=db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Own Work" in result
+        assert "Other Work" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_list_named_sessions_uses_root_metadata_for_cross_user_tip(self, tmp_path):
+        """Bare /resume must not render another user's compression-tip metadata."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        _create_cross_user_compression_tip(db)
+
+        event = _make_event(text="/resume")
+        runner = _make_runner(session_db=db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Root Safe Title" in result
+        assert "root safe preview" in result
+        assert "Other Tip Title" not in result
+        assert "u2_tip" not in result
+        assert "other tip secret preview" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_list_named_sessions_uses_root_metadata_for_rejoined_cross_user_chain(self, tmp_path):
+        """Bare /resume must not render a rejoined tip after an unsafe hop."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        _create_cross_user_rejoined_compression_tip(db)
+
+        event = _make_event(text="/resume")
+        runner = _make_runner(session_db=db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Root Safe Title" in result
+        assert "root safe preview" in result
+        assert "Rejoined Tip Title" not in result
+        assert "u1_tip" not in result
+        assert "rejoined tip preview" not in result
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_list_shows_usage_when_no_titled(self, tmp_path):
         """With no arg and no titled sessions, shows instructions."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")  # No title
+        db.create_session("sess_001", "telegram", user_id="12345")  # No title
 
         event = _make_event(text="/resume")
         runner = _make_runner(session_db=db, event=event)
@@ -115,11 +235,11 @@ class TestHandleResumeCommand:
         """Numeric argument resumes the indexed titled session from the list."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")
-        db.create_session("sess_002", "telegram")
+        db.create_session("sess_001", "telegram", user_id="12345")
+        db.create_session("sess_002", "telegram", user_id="12345")
         db.set_session_title("sess_001", "Research")
         db.set_session_title("sess_002", "Coding")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume 2")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -133,13 +253,36 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_resume_by_index_scoped_to_user_id(self, tmp_path):
+        """Numeric choices are built from the requesting user's visible list."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("other_session", "telegram", user_id="99999")
+        db.create_session("own_session", "telegram", user_id="12345")
+        db.set_session_title("other_session", "Other Work")
+        db.set_session_title("own_session", "Own Work")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume 1")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        await runner._handle_resume_command(event)
+
+        call_args = runner.session_store.switch_session.call_args
+        assert call_args[0][1] == "own_session"
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_index_out_of_range(self, tmp_path):
         """Out-of-range numeric arguments show a helpful error."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_001", "telegram")
+        db.create_session("sess_001", "telegram", user_id="12345")
         db.set_session_title("sess_001", "Research")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume 9")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -156,9 +299,9 @@ class TestHandleResumeCommand:
         """Resolves a title and switches to that session."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session_abc", "telegram")
+        db.create_session("old_session_abc", "telegram", user_id="12345")
         db.set_session_title("old_session_abc", "My Project")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume My Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -174,11 +317,53 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_resume_by_name_scoped_to_user_id(self, tmp_path):
+        """Does not resolve a title owned by another user on the same platform."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("other_session", "telegram", user_id="99999")
+        db.set_session_title("other_session", "Other User Work")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume Other User Work")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_by_name_scoped_to_source(self, tmp_path):
+        """Does not resolve a title owned by the same user on another source."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("cli_session", "cli", user_id="12345")
+        db.set_session_title("cli_session", "CLI Work")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume CLI Work")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_nonexistent_name(self, tmp_path):
         """Returns error for unknown session name."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume Nonexistent Session")
         runner = _make_runner(session_db=db, event=event)
@@ -191,7 +376,7 @@ class TestHandleResumeCommand:
         """Returns friendly message when already on the requested session."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
         db.set_session_title("current_session_001", "Active Project")
 
         event = _make_event(text="/resume Active Project")
@@ -206,11 +391,11 @@ class TestHandleResumeCommand:
         """Asking for 'My Project' when 'My Project #2' exists gets the latest."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("sess_v1", "telegram")
+        db.create_session("sess_v1", "telegram", user_id="12345")
         db.set_session_title("sess_v1", "My Project")
-        db.create_session("sess_v2", "telegram")
+        db.create_session("sess_v2", "telegram", user_id="12345")
         db.set_session_title("sess_v2", "My Project #2")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume My Project")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -224,17 +409,45 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_resume_lineage_scoped_to_user_id(self, tmp_path):
+        """Lineage lookup ignores numbered continuations owned by other users."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("own_session", "telegram", user_id="12345")
+        db.set_session_title("own_session", "My Project")
+        db.create_session("other_session", "telegram", user_id="99999")
+        db.set_session_title("other_session", "My Project #2")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume My Project")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        await runner._handle_resume_command(event)
+
+        call_args = runner.session_store.switch_session.call_args
+        assert call_args[0][1] == "own_session"
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_follows_compression_continuation(self, tmp_path):
         """Gateway /resume should reopen the live descendant after compression."""
         from hermes_state import SessionDB
 
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("compressed_root", "telegram")
+        db.create_session("compressed_root", "telegram", user_id="12345")
         db.set_session_title("compressed_root", "Compressed Work")
         db.end_session("compressed_root", "compression")
-        db.create_session("compressed_child", "telegram", parent_session_id="compressed_root")
+        db.create_session(
+            "compressed_child",
+            "telegram",
+            user_id="12345",
+            parent_session_id="compressed_root",
+        )
         db.append_message("compressed_child", "user", "hello from continuation")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume Compressed Work")
         runner = _make_runner(
@@ -262,9 +475,9 @@ class TestHandleResumeCommand:
         """Switching sessions clears any cached running agent."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session", "telegram")
+        db.create_session("old_session", "telegram", user_id="12345")
         db.set_session_title("old_session", "Old Work")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume Old Work")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -288,9 +501,9 @@ class TestHandleResumeCommand:
         import threading
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("old_session", "telegram")
+        db.create_session("old_session", "telegram", user_id="12345")
         db.set_session_title("old_session", "Old Work")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume Old Work")
         runner = _make_runner(session_db=db, current_session_id="current_session_001",
@@ -315,9 +528,9 @@ class TestHandleResumeCommand:
         """
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("abc123", "telegram")
+        db.create_session("abc123", "telegram", user_id="12345")
         db.set_session_title("abc123", "Bracketed")
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         for raw in ("<abc123>", "[abc123]", '"abc123"', "'abc123'"):
             event = _make_event(text=f"/resume {raw}")
@@ -344,9 +557,9 @@ class TestHandleResumeCommand:
         """
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("unnamed_session_xyz", "telegram")
+        db.create_session("unnamed_session_xyz", "telegram", user_id="12345")
         # Deliberately no title set — this session can ONLY be resolved by ID.
-        db.create_session("current_session_001", "telegram")
+        db.create_session("current_session_001", "telegram", user_id="12345")
 
         event = _make_event(text="/resume unnamed_session_xyz")
         runner = _make_runner(
@@ -362,8 +575,6 @@ class TestHandleResumeCommand:
         )
         db.close()
 
-
-
 class TestHandleSessionsCommand:
     """Tests for GatewayRunner._handle_sessions_command."""
 
@@ -371,9 +582,9 @@ class TestHandleSessionsCommand:
     async def test_sessions_command_lists_current_platform_sessions(self, tmp_path):
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("tg_session", "telegram")
+        db.create_session("tg_session", "telegram", user_id="12345")
         db.set_session_title("tg_session", "Telegram Work")
-        db.create_session("discord_session", "discord")
+        db.create_session("discord_session", "discord", user_id="12345")
         db.set_session_title("discord_session", "Discord Work")
 
         event = _make_event(text="/sessions")
@@ -391,9 +602,9 @@ class TestHandleSessionsCommand:
     async def test_sessions_all_full_lists_cross_platform_unnamed_sessions(self, tmp_path):
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("tg_named", "telegram")
+        db.create_session("tg_named", "telegram", user_id="12345")
         db.set_session_title("tg_named", "Telegram Work")
-        db.create_session("discord_unnamed", "discord")
+        db.create_session("discord_unnamed", "discord", user_id="12345")
         db.append_message("discord_unnamed", "user", "discord first prompt")
 
         event = _make_event(text="/sessions all full")
@@ -407,10 +618,90 @@ class TestHandleSessionsCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_sessions_command_filters_current_platform_by_user_id(self, tmp_path):
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("own_session", "telegram", user_id="12345")
+        db.set_session_title("own_session", "Own Work")
+        db.create_session("other_session", "telegram", user_id="99999")
+        db.set_session_title("other_session", "Other Work")
+
+        event = _make_event(text="/sessions")
+        runner = _make_runner(session_db=db, event=event)
+
+        result = await runner._handle_sessions_command(event)
+
+        assert "Own Work" in result
+        assert "own_session" in result
+        assert "Other Work" not in result
+        assert "other_session" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_sessions_command_filters_null_user_metadata(self, tmp_path):
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("null_user_session", "telegram")
+        db.set_session_title("null_user_session", "Null User Work")
+        db.create_session("other_user_session", "telegram", user_id="99999")
+        db.set_session_title("other_user_session", "Other User Work")
+
+        event = _make_event(text="/sessions", user_id=None)
+        runner = _make_runner(session_db=db, event=event)
+
+        result = await runner._handle_sessions_command(event)
+
+        assert "Null User Work" in result
+        assert "null_user_session" in result
+        assert "Other User Work" not in result
+        assert "other_user_session" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_sessions_command_uses_root_metadata_for_cross_user_tip(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        _create_cross_user_compression_tip(db)
+
+        event = _make_event(text="/sessions")
+        runner = _make_runner(session_db=db, event=event)
+
+        result = await runner._handle_sessions_command(event)
+
+        assert "Root Safe Title" in result
+        assert "u1_root" in result
+        assert "root safe preview" in result
+        assert "Other Tip Title" not in result
+        assert "u2_tip" not in result
+        assert "other tip secret preview" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_sessions_command_uses_root_metadata_for_rejoined_cross_user_chain(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        _create_cross_user_rejoined_compression_tip(db)
+
+        event = _make_event(text="/sessions")
+        runner = _make_runner(session_db=db, event=event)
+
+        result = await runner._handle_sessions_command(event)
+
+        assert "Root Safe Title" in result
+        assert "u1_root" in result
+        assert "root safe preview" in result
+        assert "Rejoined Tip Title" not in result
+        assert "u1_tip" not in result
+        assert "rejoined tip preview" not in result
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_gateway_dispatches_sessions_command(self, tmp_path):
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("tg_session", "telegram")
+        db.create_session("tg_session", "telegram", user_id="12345")
         db.set_session_title("tg_session", "Telegram Work")
 
         event = _make_event(text="/sessions")
@@ -421,4 +712,103 @@ class TestHandleSessionsCommand:
 
         assert result == "sessions output"
         runner._handle_sessions_command.assert_awaited_once_with(event)
+
+
+class TestHandleResumeScoping:
+    """Session-boundary security tests for gateway /resume."""
+
+    @pytest.mark.asyncio
+    async def test_resume_by_session_id_scoped_to_user_id(self, tmp_path):
+        """Does not resolve a direct session ID owned by another user."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("other_session_xyz", "telegram", user_id="99999")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume other_session_xyz")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_cross_user_compression_child_direct_id(self, tmp_path):
+        """A null-user source cannot claim a legacy null-user compression child."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("victim_parent", "telegram", user_id="victim")
+        db.set_session_title("victim_parent", "Victim Work")
+        db.end_session("victim_parent", "compression")
+        db.create_session(
+            "legacy_null_child",
+            "telegram",
+            parent_session_id="victim_parent",
+        )
+        db.append_message("legacy_null_child", "user", "victim continuation")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume legacy_null_child", user_id=None)
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_continuation_that_loses_user_scope(self, tmp_path):
+        """Resolving a scoped parent to an unowned compression child fails closed."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("compressed_root", "telegram", user_id="12345")
+        db.set_session_title("compressed_root", "Compressed Work")
+        db.end_session("compressed_root", "compression")
+        db.create_session(
+            "legacy_null_child",
+            "telegram",
+            parent_session_id="compressed_root",
+        )
+        db.append_message("legacy_null_child", "user", "unscoped continuation")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume Compressed Work")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_by_session_id_scoped_to_source(self, tmp_path):
+        """Does not resolve a direct session ID from another source."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("cli_session_xyz", "cli", user_id="12345")
+        db.create_session("current_session_001", "telegram", user_id="12345")
+
+        event = _make_event(text="/resume cli_session_xyz")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
         db.close()

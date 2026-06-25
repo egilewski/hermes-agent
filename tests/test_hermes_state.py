@@ -774,6 +774,16 @@ class TestMessageStorage:
             "second answer",
         ]
 
+    def test_get_messages_as_conversation_excludes_cross_user_parent(self, db):
+        db.create_session("root", "telegram", user_id="other-user")
+        db.append_message("root", role="user", content="other prompt")
+        db.create_session("child", "telegram", parent_session_id="root", user_id="current-user")
+        db.append_message("child", role="user", content="current prompt")
+
+        conv = db.get_messages_as_conversation("child", include_ancestors=True)
+
+        assert [m["content"] for m in conv if m["role"] == "user"] == ["current prompt"]
+
     def test_get_messages_as_conversation_avoids_repeated_resume_prompts_from_ancestors(self, db):
         db.create_session("root", "tui")
         db.append_message("root", role="user", content="same prompt")
@@ -1525,6 +1535,18 @@ class TestCounts:
         db.create_session(session_id="s3", source="cli")
         assert db.session_count(source="cli") == 2
         assert db.session_count(source="telegram") == 1
+
+    def test_session_count_by_user_id(self, db):
+        db.create_session(session_id="s1", source="telegram", user_id="user-a")
+        db.create_session(session_id="s2", source="telegram", user_id="user-b")
+        db.create_session(session_id="s3", source="telegram")
+
+        assert db.session_count(source="telegram", user_id="user-a") == 1
+        assert db.session_count(
+            source="telegram",
+            user_id=None,
+            filter_user_id=True,
+        ) == 1
 
     def test_message_count_total(self, db):
         assert db.message_count() == 0
@@ -2803,6 +2825,47 @@ class TestTitleUniqueness:
         assert result is not None
         assert result["id"] == "s1"
 
+    def test_get_session_by_title_scoped_to_user_id(self, db):
+        db.create_session("s1", "telegram", user_id="user-a")
+        db.create_session("s2", "telegram", user_id="user-b")
+        db.set_session_title("s1", "refactoring auth")
+        db.set_session_title("s2", "deployment notes")
+
+        result = db.get_session_by_title(
+            "deployment notes", source="telegram", user_id="user-a"
+        )
+        assert result is None
+
+        result = db.get_session_by_title(
+            "deployment notes", source="telegram", user_id="user-b"
+        )
+        assert result is not None
+        assert result["id"] == "s2"
+
+    def test_get_session_by_title_can_filter_null_user_id(self, db):
+        db.create_session("s1", "telegram")
+        db.create_session("s2", "telegram", user_id="user-b")
+        db.set_session_title("s1", "null user notes")
+        db.set_session_title("s2", "deployment notes")
+
+        assert (
+            db.get_session_by_title(
+                "deployment notes",
+                source="telegram",
+                user_id=None,
+                filter_user_id=True,
+            )
+            is None
+        )
+        result = db.get_session_by_title(
+            "null user notes",
+            source="telegram",
+            user_id=None,
+            filter_user_id=True,
+        )
+        assert result is not None
+        assert result["id"] == "s1"
+
     def test_get_session_by_title_not_found(self, db):
         assert db.get_session_by_title("nonexistent") is None
 
@@ -2837,6 +2900,26 @@ class TestTitleLineage:
         db.set_session_title("s3", "my project #3")
         # Resolving "my project" should return s3 (latest numbered variant)
         assert db.resolve_session_by_title("my project") == "s3"
+
+    def test_resolve_lineage_scoped_to_user_id(self, db):
+        """Numbered variants owned by another user do not shadow an exact title."""
+        db.create_session("s1", "telegram", user_id="user-a")
+        db.set_session_title("s1", "my project")
+        db.create_session("s2", "telegram", user_id="user-b")
+        db.set_session_title("s2", "my project #2")
+
+        assert (
+            db.resolve_session_by_title(
+                "my project", source="telegram", user_id="user-a"
+            )
+            == "s1"
+        )
+        assert (
+            db.resolve_session_by_title(
+                "my project", source="telegram", user_id="user-b"
+            )
+            == "s2"
+        )
 
     def test_resolve_exact_numbered(self, db):
         """Resolving an exact numbered title returns that specific session."""
@@ -3054,6 +3137,24 @@ class TestListSessionsRich:
         db.create_session("s1", "cli")
         db.create_session("s2", "telegram")
         sessions = db.list_sessions_rich(source="cli")
+        assert len(sessions) == 1
+        assert sessions[0]["id"] == "s1"
+
+    def test_rich_list_user_id_filter(self, db):
+        db.create_session("s1", "telegram", user_id="user-a")
+        db.create_session("s2", "telegram", user_id="user-b")
+        sessions = db.list_sessions_rich(source="telegram", user_id="user-a")
+        assert len(sessions) == 1
+        assert sessions[0]["id"] == "s1"
+
+    def test_rich_list_user_id_filter_can_match_null(self, db):
+        db.create_session("s1", "telegram")
+        db.create_session("s2", "telegram", user_id="user-b")
+        sessions = db.list_sessions_rich(
+            source="telegram",
+            user_id=None,
+            filter_user_id=True,
+        )
         assert len(sessions) == 1
         assert sessions[0]["id"] == "s1"
 
@@ -3327,6 +3428,143 @@ class TestCompressionChainProjection:
         assert tip_row["preview"].startswith("latest message")
         assert tip_row["ended_at"] is None  # tip is still live
         assert tip_row["end_reason"] is None
+
+    def test_list_projection_keeps_root_metadata_when_tip_user_mismatches(self, db):
+        """A scoped root must not surface another user's compression tip."""
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("u1_root", "telegram", user_id="u1")
+        db.set_session_title("u1_root", "Root Safe Title")
+        db.append_message("u1_root", "user", "root safe preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+            (t0, t0 + 10, "compression", "u1_root"),
+        )
+        db.create_session(
+            "u2_tip",
+            "telegram",
+            user_id="u2",
+            parent_session_id="u1_root",
+        )
+        db.set_session_title("u2_tip", "Other Tip Title")
+        db.append_message("u2_tip", "user", "other tip secret preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?",
+            (t0 + 11, "u2_tip"),
+        )
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="telegram",
+            user_id="u1",
+            filter_user_id=True,
+            limit=20,
+        )
+
+        assert len(sessions) == 1
+        row = sessions[0]
+        assert row["id"] == "u1_root"
+        assert row["title"] == "Root Safe Title"
+        assert row["preview"].startswith("root safe preview")
+        assert "_lineage_root_id" not in row
+        assert "Other Tip Title" not in str(row)
+        assert "other tip secret preview" not in str(row)
+
+    def test_list_projection_keeps_root_metadata_when_intermediate_user_mismatches(self, db):
+        """Every compression edge must preserve user scope, not only the final tip."""
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("u1_root", "telegram", user_id="u1")
+        db.set_session_title("u1_root", "Root Safe Title")
+        db.append_message("u1_root", "user", "root safe preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+            (t0, t0 + 10, "compression", "u1_root"),
+        )
+        db.create_session(
+            "u2_mid",
+            "telegram",
+            user_id="u2",
+            parent_session_id="u1_root",
+        )
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+            (t0 + 11, t0 + 20, "compression", "u2_mid"),
+        )
+        db.create_session(
+            "u1_tip",
+            "telegram",
+            user_id="u1",
+            parent_session_id="u2_mid",
+        )
+        db.set_session_title("u1_tip", "Rejoined Tip Title")
+        db.append_message("u1_tip", "user", "rejoined tip preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?",
+            (t0 + 21, "u1_tip"),
+        )
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="telegram",
+            user_id="u1",
+            filter_user_id=True,
+            limit=20,
+        )
+
+        assert len(sessions) == 1
+        row = sessions[0]
+        assert row["id"] == "u1_root"
+        assert row["title"] == "Root Safe Title"
+        assert row["preview"].startswith("root safe preview")
+        assert db.get_compression_tip("u1_root") == "u1_root"
+        assert "_lineage_root_id" not in row
+        assert "Rejoined Tip Title" not in str(row)
+        assert "rejoined tip preview" not in str(row)
+
+    def test_list_projection_keeps_root_metadata_when_tip_source_mismatches(self, db):
+        """A scoped root must not surface another source's compression tip."""
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("tg_root", "telegram", user_id="u1")
+        db.set_session_title("tg_root", "Telegram Root")
+        db.append_message("tg_root", "user", "telegram root preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=?, end_reason=? WHERE id=?",
+            (t0, t0 + 10, "compression", "tg_root"),
+        )
+        db.create_session(
+            "discord_tip",
+            "discord",
+            user_id="u1",
+            parent_session_id="tg_root",
+        )
+        db.set_session_title("discord_tip", "Discord Tip")
+        db.append_message("discord_tip", "user", "discord secret preview")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?",
+            (t0 + 11, "discord_tip"),
+        )
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="telegram",
+            user_id="u1",
+            filter_user_id=True,
+            limit=20,
+        )
+
+        assert len(sessions) == 1
+        row = sessions[0]
+        assert row["id"] == "tg_root"
+        assert row["title"] == "Telegram Root"
+        assert row["preview"].startswith("telegram root preview")
+        assert "_lineage_root_id" not in row
+        assert "Discord Tip" not in str(row)
+        assert "discord secret preview" not in str(row)
 
     def test_list_projection_uses_tip_cwd(self, db):
         """Projected lineage rows should carry cwd from the live tip row.
