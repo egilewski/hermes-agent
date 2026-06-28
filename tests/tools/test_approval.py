@@ -1921,3 +1921,195 @@ class TestTirithImportErrorFailOpenPolicy:
                         result = check_all_command_guards("echo hello", "local")
 
         assert result.get("approved") is True
+
+
+class TestGatewayTirithScannerBypassHardening:
+    """Gateway approval bypasses must not bypass the pre-exec scanner."""
+
+    SESSION_KEY = "test-gateway-tirith-bypass"
+
+    def setup_method(self):
+        from tools import approval as mod
+        mod._gateway_queues.clear()
+        mod._gateway_notify_cbs.clear()
+        mod._session_approved.clear()
+        mod._session_yolo.clear()
+        mod._permanent_approved.clear()
+        mod._pending.clear()
+
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("HERMES_GATEWAY_SESSION", "HERMES_YOLO_MODE",
+                      "HERMES_SESSION_KEY", "HERMES_INTERACTIVE",
+                      "HERMES_EXEC_ASK", "HERMES_CRON_SESSION")
+        }
+        for key in self._saved_env:
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        from tools import approval as mod
+        mod._gateway_queues.clear()
+        mod._gateway_notify_cbs.clear()
+        mod._session_approved.clear()
+        mod._session_yolo.clear()
+        mod._permanent_approved.clear()
+        mod._pending.clear()
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _run_gateway_guard_and_resolve(self, mod, command, choice="once"):
+        notified = []
+        result_holder = {}
+        mod.register_gateway_notify(self.SESSION_KEY, lambda data: notified.append(data))
+
+        def _check():
+            token = mod.set_current_session_key(self.SESSION_KEY)
+            os.environ["HERMES_GATEWAY_SESSION"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = self.SESSION_KEY
+            try:
+                result_holder["result"] = mod.check_all_command_guards(command, "local")
+            finally:
+                os.environ.pop("HERMES_GATEWAY_SESSION", None)
+                os.environ.pop("HERMES_SESSION_KEY", None)
+                mod.reset_current_session_key(token)
+
+        thread = threading.Thread(target=_check)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if notified and mod._gateway_queues.get(self.SESSION_KEY):
+                break
+            time.sleep(0.02)
+
+        assert notified, "gateway approval prompt was not sent"
+        assert mod._gateway_queues.get(self.SESSION_KEY), "gateway approval queue was not created"
+        mod.resolve_gateway_approval(self.SESSION_KEY, choice)
+        thread.join(timeout=5)
+        mod.unregister_gateway_notify(self.SESSION_KEY)
+        assert "result" in result_holder, "approval wait did not finish"
+        return result_holder["result"], notified
+
+    def _run_gateway_guard_expect_no_prompt(self, mod, command):
+        notified = []
+        result_holder = {}
+        mod.register_gateway_notify(self.SESSION_KEY, lambda data: notified.append(data))
+
+        def _check():
+            token = mod.set_current_session_key(self.SESSION_KEY)
+            os.environ["HERMES_GATEWAY_SESSION"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = self.SESSION_KEY
+            try:
+                result_holder["result"] = mod.check_all_command_guards(command, "local")
+            finally:
+                os.environ.pop("HERMES_GATEWAY_SESSION", None)
+                os.environ.pop("HERMES_SESSION_KEY", None)
+                mod.reset_current_session_key(token)
+
+        thread = threading.Thread(target=_check)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if notified or "result" in result_holder:
+                break
+            time.sleep(0.02)
+
+        if notified:
+            mod.resolve_gateway_approval(self.SESSION_KEY, "deny")
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "approval guard did not return without prompting"
+        mod.unregister_gateway_notify(self.SESSION_KEY)
+        assert notified == []
+        assert "result" in result_holder, "approval guard did not return without prompting"
+        return result_holder["result"]
+
+    def _tirith_warn_result(self):
+        return {
+            "action": "warn",
+            "findings": [{
+                "rule_id": "pipe-to-interpreter",
+                "severity": "HIGH",
+                "title": "Pipe to interpreter",
+                "description": "remote script execution",
+            }],
+            "summary": "remote script execution",
+        }
+
+    def test_gateway_yolo_still_prompts_for_tirith_findings(self, monkeypatch):
+        from tools import approval as mod
+        from tools import tirith_security
+
+        monkeypatch.setattr(
+            tirith_security, "check_command_security",
+            lambda command: self._tirith_warn_result(),
+        )
+        mod.enable_session_yolo(self.SESSION_KEY)
+
+        result, notified = self._run_gateway_guard_and_resolve(mod, "echo safe")
+
+        assert result["approved"] is True
+        assert "Security scan" in notified[0]["description"]
+        assert notified[0]["pattern_keys"] == ["tirith:pipe-to-interpreter"]
+
+    def test_gateway_approval_mode_off_still_prompts_for_tirith_findings(self, monkeypatch):
+        from tools import approval as mod
+        from tools import tirith_security
+
+        monkeypatch.setattr(
+            tirith_security, "check_command_security",
+            lambda command: self._tirith_warn_result(),
+        )
+        monkeypatch.setattr(mod, "_get_approval_mode", lambda: "off")
+
+        result, notified = self._run_gateway_guard_and_resolve(mod, "echo safe")
+
+        assert result["approved"] is True
+        assert "Security scan" in notified[0]["description"]
+
+    def test_gateway_permanent_command_allowlist_still_prompts_for_tirith_findings(self, monkeypatch):
+        from tools import approval as mod
+        from tools import tirith_security
+
+        monkeypatch.setattr(
+            tirith_security, "check_command_security",
+            lambda command: self._tirith_warn_result(),
+        )
+        mod.load_permanent({"echo safe"})
+
+        result, notified = self._run_gateway_guard_and_resolve(mod, "echo safe")
+
+        assert result["approved"] is True
+        assert "Security scan" in notified[0]["description"]
+        assert notified[0]["pattern_keys"] == ["tirith:pipe-to-interpreter"]
+
+    def test_gateway_yolo_still_skips_regex_only_dangerous_prompt(self, monkeypatch):
+        from tools import approval as mod
+        from tools import tirith_security
+
+        monkeypatch.setattr(
+            tirith_security,
+            "check_command_security",
+            lambda command: {"action": "allow", "findings": [], "summary": ""},
+        )
+        mod.enable_session_yolo(self.SESSION_KEY)
+
+        result = self._run_gateway_guard_expect_no_prompt(mod, "rm -rf .git")
+
+        assert result["approved"] is True
+
+    def test_gateway_permanent_command_allowlist_skips_regex_only_dangerous_prompt(self, monkeypatch):
+        from tools import approval as mod
+        from tools import tirith_security
+
+        monkeypatch.setattr(
+            tirith_security,
+            "check_command_security",
+            lambda command: {"action": "allow", "findings": [], "summary": ""},
+        )
+        mod.load_permanent({"rm -rf .git"})
+
+        result = self._run_gateway_guard_expect_no_prompt(mod, "rm -rf .git")
+
+        assert result["approved"] is True
