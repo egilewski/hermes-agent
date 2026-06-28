@@ -83,6 +83,13 @@ def _model_switch_skew_guard() -> Optional[str]:
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
+    def _hide_feishu_group_session_details(self, source: SessionSource) -> bool:
+        chat_type = str(source.chat_type or "").strip().lower()
+        return (
+            source.platform == Platform.FEISHU
+            and chat_type in {"group", "forum", "topic_group"}
+        )
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 
@@ -3126,6 +3133,7 @@ class GatewaySlashCommandsMixin:
         allow_all = "--all" in parts
         allow_cross_room = "--cross-room" in parts
         name = " ".join(p for p in parts if p not in {"--all", "--cross-room"}).strip()
+        hide_session_details = self._hide_feishu_group_session_details(source)
 
         # Strip common outer brackets/quotes users may type literally from the
         # usage hint (e.g. ``/resume <abc123>``). Mirrors the CLI behavior.
@@ -3136,11 +3144,26 @@ class GatewaySlashCommandsMixin:
             or (name[0] == "'" and name[-1] == "'")
         ):
             name = name[1:-1].strip()
+        display_name = "selected session" if hide_session_details else name
 
         async def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
             sessions = await self._session_db.list_sessions_rich(source=user_source, limit=10)
             return [s for s in sessions if s.get("title")][:10]
+
+        def _resume_display_title(
+            session: dict | None = None,
+            *,
+            index: int | None = None,
+            fallback: str = "selected session",
+        ) -> str:
+            if hide_session_details:
+                return f"Session {index}" if index is not None else "selected session"
+            if session:
+                title = session.get("title")
+                if title:
+                    return str(title)
+            return fallback
 
         if not name:
             # List recent titled sessions for this user/platform
@@ -3159,12 +3182,12 @@ class GatewaySlashCommandsMixin:
                     return t("gateway.resume.no_named_sessions")
                 lines = [t("gateway.resume.list_header")]
                 for idx, s in enumerate(titled[:10], start=1):
-                    title = s["title"]
+                    title = _resume_display_title(s, index=idx)
                     if source.platform == Platform.MATRIX and allow_all:
                         origin = self._gateway_session_origin_for_id(str(s.get("id") or ""))
                         if origin:
                             title = f"{title} — {origin.chat_name or origin.chat_id}"
-                    preview = s.get("preview", "")[:40]
+                    preview = "" if hide_session_details else (s.get("preview") or "")[:40]
                     preview_part = t("gateway.resume.list_preview_suffix", preview=preview) if preview else ""
                     lines.append(t("gateway.resume.list_item_numbered", index=idx, title=title, preview_part=preview_part))
                 lines.append(t("gateway.resume.list_footer_numbered"))
@@ -3192,7 +3215,8 @@ class GatewaySlashCommandsMixin:
                 return t("gateway.resume.out_of_range", index=index)
             target = titled[index - 1]
             target_id = target.get("id")
-            name = target.get("title") or name
+            name = _resume_display_title(target, index=index, fallback=name)
+            display_name = name
         else:
             # Try direct session ID lookup first (so `/resume <session_id>`
             # works in the gateway, not just `/resume <title>`).
@@ -3202,7 +3226,7 @@ class GatewaySlashCommandsMixin:
             else:
                 target_id = await self._session_db.resolve_session_by_title(name)
         if not target_id:
-            return t("gateway.resume.not_found", name=name)
+            return t("gateway.resume.not_found", name=display_name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
@@ -3224,7 +3248,7 @@ class GatewaySlashCommandsMixin:
         # Check if already on that session
         current_entry = self.session_store.get_or_create_session(source)
         if current_entry.session_id == target_id:
-            return t("gateway.resume.already_on", name=name)
+            return t("gateway.resume.already_on", name=display_name)
 
         # Clear any running agent for this session key
         self._release_running_agent_state(session_key)
@@ -3257,7 +3281,11 @@ class GatewaySlashCommandsMixin:
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = await self._session_db.get_session_title(target_id) or name
+        title = (
+            display_name
+            if hide_session_details
+            else await self._session_db.get_session_title(target_id) or name
+        )
 
         # Count messages for context
         history = self.session_store.load_transcript(target_id)
@@ -3317,6 +3345,11 @@ class GatewaySlashCommandsMixin:
                 if self._same_matrix_room(
                     source, self._gateway_session_origin_for_id(str(row.get("id") or ""))
                 )
+            ]
+        if self._hide_feishu_group_session_details(source):
+            rows = [
+                {**row, "title": f"Session {idx}", "preview": ""}
+                for idx, row in enumerate(rows, start=1)
             ]
         return format_gateway_session_listing(
             rows,
