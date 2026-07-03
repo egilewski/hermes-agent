@@ -259,6 +259,18 @@ TOOLSETS = {
         "includes": []
     },
 
+    "delegate_orchestrator_blocked": {
+        "description": "Tools that delegated orchestrator agents must never receive",
+        "tools": [
+            "clarify",
+            "memory",
+            "send_message",
+            "execute_code",
+            "cronjob",
+        ],
+        "includes": []
+    },
+
     # "honcho" toolset removed — Honcho is now a memory provider plugin.
     # Tools are injected via MemoryManager, not the toolset system.
 

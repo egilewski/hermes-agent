@@ -87,3 +87,21 @@ class TestToolsetIntersection:
         assert "memory" not in child_tool_names
         assert "clarify" not in child_tool_names
         assert "read_file" in child_tool_names
+
+    def test_orchestrator_delegate_blocklist_preserves_delegate_task(self):
+        """Orchestrator children keep delegate_task but lose other blocked tools."""
+        from model_tools import get_tool_definitions
+
+        child_tools = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram", "delegation"],
+            disabled_toolsets=["delegate_orchestrator_blocked"],
+            quiet_mode=True,
+        )
+
+        child_tool_names = {t["function"]["name"] for t in child_tools}
+        assert "delegate_task" in child_tool_names
+        assert "cronjob" not in child_tool_names
+        assert "execute_code" not in child_tool_names
+        assert "memory" not in child_tool_names
+        assert "clarify" not in child_tool_names
+        assert "read_file" in child_tool_names

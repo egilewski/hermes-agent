@@ -53,6 +53,15 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
+_DELEGATE_LEAF_DISABLED_TOOLSET = "delegate_blocked"
+_DELEGATE_ORCHESTRATOR_DISABLED_TOOLSET = "delegate_orchestrator_blocked"
+_DELEGATE_INTERNAL_DISABLED_TOOLSETS = frozenset(
+    {
+        _DELEGATE_LEAF_DISABLED_TOOLSET,
+        _DELEGATE_ORCHESTRATOR_DISABLED_TOOLSET,
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Subagent approval callbacks
@@ -110,6 +119,22 @@ def _get_subagent_approval_callback():
     if is_truthy_value(val):
         return _subagent_auto_approve
     return _subagent_auto_deny
+
+
+def _delegate_disabled_toolsets_for_role(parent_agent, role: str) -> List[str]:
+    disabled_toolsets = [
+        name
+        for name in (getattr(parent_agent, "disabled_toolsets", None) or [])
+        if name not in _DELEGATE_INTERNAL_DISABLED_TOOLSETS
+    ]
+    delegate_disabled_toolset = (
+        _DELEGATE_ORCHESTRATOR_DISABLED_TOOLSET
+        if role == "orchestrator"
+        else _DELEGATE_LEAF_DISABLED_TOOLSET
+    )
+    if delegate_disabled_toolset not in disabled_toolsets:
+        disabled_toolsets.append(delegate_disabled_toolset)
+    return disabled_toolsets
 
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
@@ -1266,9 +1291,9 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
-    child_disabled_toolsets = list(getattr(parent_agent, "disabled_toolsets", None) or [])
-    if "delegate_blocked" not in child_disabled_toolsets:
-        child_disabled_toolsets.append("delegate_blocked")
+    child_disabled_toolsets = _delegate_disabled_toolsets_for_role(
+        parent_agent, effective_role
+    )
 
     child = AIAgent(
         base_url=effective_base_url,
