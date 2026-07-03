@@ -1421,8 +1421,8 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         Gateway platform bundles such as hermes-telegram contain both safe tools
         and blocked child-only tools. The child keeps the bundle enabled but must
         also pass a subtraction toolset so model_tools removes cronjob,
-        delegate_task, execute_code, memory, clarify, and send_message during
-        schema resolution.
+        delegate_task, execute_code, memory, skill_manage, clarify, and
+        send_message during schema resolution.
         """
         parent = _make_mock_parent(depth=0)
         parent.enabled_toolsets = ["hermes-telegram"]

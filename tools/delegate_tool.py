@@ -47,6 +47,7 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "delegate_task",  # no recursive delegation
         "clarify",  # no user interaction
         "memory",  # no writes to shared MEMORY.md
+        "skill_manage",  # no writes to procedural memory
         "send_message",  # no cross-platform side effects
         "execute_code",  # children should reason step-by-step, not write scripts
         "cronjob",  # no scheduling more work in the parent's name

@@ -88,6 +88,22 @@ class TestToolsetIntersection:
         assert "clarify" not in child_tool_names
         assert "read_file" in child_tool_names
 
+    def test_delegate_blocklists_keep_skills_read_only(self):
+        """Delegated children can read skills but cannot write procedural memory."""
+        from model_tools import get_tool_definitions
+
+        for disabled_toolset in ("delegate_blocked", "delegate_orchestrator_blocked"):
+            child_tools = get_tool_definitions(
+                enabled_toolsets=["skills"],
+                disabled_toolsets=[disabled_toolset],
+                quiet_mode=True,
+            )
+
+            child_tool_names = {t["function"]["name"] for t in child_tools}
+            assert "skills_list" in child_tool_names
+            assert "skill_view" in child_tool_names
+            assert "skill_manage" not in child_tool_names
+
     def test_orchestrator_delegate_blocklist_preserves_delegate_task(self):
         """Orchestrator children keep delegate_task but lose other blocked tools."""
         from model_tools import get_tool_definitions

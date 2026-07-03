@@ -252,6 +252,7 @@ TOOLSETS = {
             "delegate_task",
             "clarify",
             "memory",
+            "skill_manage",
             "send_message",
             "execute_code",
             "cronjob",
@@ -264,6 +265,7 @@ TOOLSETS = {
         "tools": [
             "clarify",
             "memory",
+            "skill_manage",
             "send_message",
             "execute_code",
             "cronjob",
