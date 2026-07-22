@@ -53,6 +53,10 @@ jobs:
             sysctl -n machdep.cpu.brand_string
 
       - run:
+          name: Test diagnostic harness
+          command: npm run --prefix apps/desktop repro:short-session-hang:test
+
+      - run:
           name: Run counterbalanced A/B diagnostic
           no_output_timeout: 30m
           command: |
@@ -70,7 +74,7 @@ jobs:
           name: Validate diagnostic summary
           when: always
           command: |
-            node -e "const fs=require('node:fs'); const p='short-session-hang-artifacts/summary.json'; if(!fs.existsSync(p)) throw new Error('missing '+p); const s=JSON.parse(fs.readFileSync(p,'utf8')); const repetitions=Number(process.env.REPETITIONS); if(!Number.isInteger(repetitions)||repetitions<1) throw new Error('invalid repetitions'); for(const label of ['baseline','candidate']) { const result=s[label]; if(!result || typeof result.warmup?.hardFailure!=='boolean' || !Array.isArray(result.runs) || result.runs.length!==repetitions || result.runs.some(run=>typeof run?.hardFailure!=='boolean')) throw new Error('invalid '+label+' summary') }"
+            node --input-type=module -e "import { validateArtifactBundle } from './apps/desktop/scripts/run-short-session-hang-repro.mjs'; validateArtifactBundle('short-session-hang-artifacts', Number(process.env.REPETITIONS))"
 
 workflows:
   issue-63047-macos-arm64:

@@ -40,6 +40,7 @@
     "perf": "node scripts/perf/run.mjs",
     "perf:serve": "node scripts/perf/serve.mjs",
     "repro:short-session-hang": "node scripts/run-short-session-hang-repro.mjs",
+    "repro:short-session-hang:test": "node --test scripts/run-short-session-hang-repro.test.mjs",
     "test:desktop": "node scripts/test-desktop.mjs",
     "test:desktop:all": "node scripts/test-desktop.mjs all",
     "test:desktop:dmg": "node scripts/test-desktop.mjs dmg",

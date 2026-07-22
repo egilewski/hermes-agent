@@ -37,6 +37,10 @@ const HEAD_REF_RE = /^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/
 const HEAD_COMPONENT_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 const require = createRequire(import.meta.url)
 
+class ReproductionError extends Error {
+  name = 'ReproductionError'
+}
+
 function usage() {
   console.log(`Usage: node scripts/run-short-session-hang-repro.mjs [options]
 
@@ -337,7 +341,7 @@ function writeSandboxConfig(home, mockUrl) {
   writeFileSync(join(home, '.env'), 'SHORT_SESSION_API_KEY=local-diagnostic-only\n')
 }
 
-async function waitFor(cdp, expression, timeoutMs, label) {
+async function waitFor(cdp, expression, timeoutMs, label, ErrorType = Error) {
   const deadline = Date.now() + timeoutMs
 
   while (Date.now() < deadline) {
@@ -349,10 +353,10 @@ async function waitFor(cdp, expression, timeoutMs, label) {
       // Renderer is still loading.
     }
 
-    await sleep(250)
+    await sleep(Math.min(250, Math.max(1, deadline - Date.now())))
   }
 
-  throw new Error(`timed out waiting for ${label}`)
+  throw new ErrorType(`timed out waiting for ${label}`)
 }
 
 async function screenshot(cdp, path) {
@@ -507,19 +511,19 @@ function withWatchdog(task, onTimeout) {
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         onTimeout()
-        reject(new Error(`outer watchdog exceeded ${OUTER_WATCHDOG_MS}ms`))
+        reject(new ReproductionError(`outer watchdog exceeded ${OUTER_WATCHDOG_MS}ms`))
       }, OUTER_WATCHDOG_MS)
     })
   ]).finally(() => clearTimeout(timer))
 }
 
-function withTimeout(task, timeoutMs, label) {
+function withTimeout(task, timeoutMs, label, ErrorType = Error) {
   let timer
 
   return Promise.race([
     task,
     new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs)
+      timer = setTimeout(() => reject(new ErrorType(`${label} exceeded ${timeoutMs}ms`)), timeoutMs)
     })
   ]).finally(() => clearTimeout(timer))
 }
@@ -552,8 +556,9 @@ async function verifyInteractiveSurfaces(cdp, timed, label) {
     waitFor(
       cdp,
       `document.body.textContent.includes(${JSON.stringify(version.appVersion)}) && !!document.querySelector('button[aria-label]')`,
-      4_000,
-      `About settings at ${label}`
+      FREEZE_MS,
+      `About settings at ${label}`,
+      ReproductionError
     )
   )
   const aboutClosed = await timed(`about.close.${label}`, () =>
@@ -567,7 +572,13 @@ async function verifyInteractiveSurfaces(cdp, timed, label) {
   }
 
   await timed(`about.closed.${label}`, () =>
-    waitFor(cdp, "!location.hash.includes('/settings')", 4_000, `About settings close at ${label}`)
+    waitFor(
+      cdp,
+      "!location.hash.includes('/settings')",
+      FREEZE_MS,
+      `About settings close at ${label}`,
+      ReproductionError
+    )
   )
   const interactive = await timed(`transcript.interactive.${label}`, () =>
     cdp.eval(
@@ -598,26 +609,26 @@ async function runRealChatChecks(cdp, timed, mock, runDir) {
         throw new Error(`real chat composer unavailable at exchange ${exchange}`)
       }
 
-      await cdp.send('Input.insertText', { text: `Deterministic real chat exchange ${exchange}` })
-      await waitFor(
-        cdp,
-        `(() => { const root = document.querySelector('[data-slot="composer-root"]'); const button = root?.querySelector('button[type="submit"]'); return Boolean(button && !button.disabled) })()`,
-        FREEZE_MS,
-        `real chat submit readiness ${exchange}`
-      )
-      const submitted = await cdp.eval(
-        `(() => { const root = document.querySelector('[data-slot="composer-root"]'); const button = root?.querySelector('button[type="submit"]'); if (!button || button.disabled) return false; button.click(); return true })()`
+      const prompt = `Deterministic real chat exchange ${exchange}`
+      await cdp.send('Input.insertText', { text: prompt })
+      const inserted = await cdp.eval(
+        `document.querySelector('[data-slot="composer-rich-input"]')?.textContent?.includes(${JSON.stringify(prompt)}) === true`
       )
 
-      if (!submitted) {
-        throw new Error(`real chat submit unavailable at exchange ${exchange}`)
+      if (!inserted) {
+        throw new Error(`real chat prompt did not reach the composer at exchange ${exchange}`)
       }
+
+      const enter = { code: 'Enter', key: 'Enter', nativeVirtualKeyCode: 36, windowsVirtualKeyCode: 13 }
+      await cdp.send('Input.dispatchKeyEvent', { ...enter, type: 'keyDown' })
+      await cdp.send('Input.dispatchKeyEvent', { ...enter, type: 'keyUp' })
 
       await waitFor(
         cdp,
         `document.querySelectorAll('[data-slot="aui_assistant-message-root"]:not([data-streaming="true"])').length > ${beforeAssistant}`,
         FREEZE_MS,
-        `real assistant response ${exchange}`
+        `real assistant response ${exchange}`,
+        ReproductionError
       )
 
       if (mock.streamingCompletionRequests() < requestCountBefore + exchange) {
@@ -648,7 +659,7 @@ async function runRendererChecks(cdp, label, runDir, mock) {
   const operations = []
   const timed = async (name, body) => {
     const started = performance.now()
-    const value = await withTimeout(Promise.resolve().then(body), FREEZE_MS, name)
+    const value = await withTimeout(Promise.resolve().then(body), FREEZE_MS, name, ReproductionError)
     const latencyMs = performance.now() - started
     operations.push({ name, latencyMs })
 
@@ -706,29 +717,62 @@ async function runRendererChecks(cdp, label, runDir, mock) {
 
   const maxOperationMs = operations.reduce((max, operation) => Math.max(max, operation.latencyMs), 0)
   const maxGapMs = Number(heartbeat.maxGapMs || 0)
+  const reproduced = maxOperationMs > FREEZE_MS || maxGapMs > FREEZE_MS
 
   return {
     checkpoints,
     fixtureManifest,
-    hardFailure: maxOperationMs > FREEZE_MS || maxGapMs > FREEZE_MS,
+    hardFailure: reproduced,
     maxGapMs,
     maxOperationMs,
     operations,
+    outcome: reproduced ? 'reproduced' : 'not-reproduced',
     realChat,
     syntheticScenario: 'renderer-only'
   }
 }
 
+async function withTemporarySandbox(label, body) {
+  const sandbox = mkdtempSync(join(tmpdir(), `hermes-short-session-${label}-`))
+
+  try {
+    return await body(sandbox)
+  } finally {
+    rmSync(sandbox, { force: true, recursive: true })
+  }
+}
+
+function resultForError(error) {
+  const reproduced = error instanceof ReproductionError
+
+  return {
+    error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+    hardFailure: true,
+    lifecycleSignals: [],
+    maxGapMs: null,
+    maxOperationMs: null,
+    operations: [],
+    outcome: reproduced ? 'reproduced' : 'harness-error'
+  }
+}
+
 async function executeRun(target, index, warmup, mock, output) {
+  return withTemporarySandbox(target.label, sandbox =>
+    executeRunInSandbox(target, index, warmup, mock, output, sandbox)
+  )
+}
+
+async function executeRunInSandbox(target, index, warmup, mock, output, sandbox) {
   const runDir = join(output, target.label, warmup ? 'warmup' : `run-${index + 1}`)
-  const sandbox = join(runDir, 'sandbox')
   const hermesHome = join(sandbox, 'hermes-home')
   const userData = join(sandbox, 'electron-user-data')
+  const desktopLog = join(hermesHome, 'logs', 'desktop.log')
   const stdoutPath = join(runDir, 'electron.stdout.log')
   const stderrPath = join(runDir, 'electron.stderr.log')
   const eventsPath = join(runDir, 'events.jsonl')
   const port = 19_000 + (process.pid % 1_000) + index * 4 + (target.label === 'candidate' ? 2 : 0) + (warmup ? 1 : 0)
 
+  mkdirSync(runDir, { recursive: true })
   mkdirSync(userData, { recursive: true })
   writeSandboxConfig(hermesHome, mock.url)
 
@@ -758,6 +802,7 @@ async function executeRun(target, index, warmup, mock, output) {
   )
 
   let exited = null
+  let spawnFailed = false
   let stopping = false
   let resolveSpawn
   let rejectSpawn
@@ -767,6 +812,7 @@ async function executeRun(target, index, warmup, mock, output) {
   })
   child.once('spawn', () => resolveSpawn())
   child.once('error', error => {
+    spawnFailed = true
     exited = exited ?? { code: null, signal: null }
     appendFileSync(
       eventsPath,
@@ -803,24 +849,8 @@ async function executeRun(target, index, warmup, mock, output) {
       processSnapshot(join(runDir, 'hard-timeout-processes.txt'), child.pid)
       sampleTree(runDir, child.pid, 'hard-timeout')
     })
-
-    const desktopLog = join(hermesHome, 'logs', 'desktop.log')
-    const logText = existsSync(desktopLog) ? readFileSync(desktopLog, 'utf8') : ''
-    const lifecycleSignals = logText
-      .split(/\r?\n/)
-      .filter(line => /webContents became unresponsive|render-process-gone/i.test(line))
-
-    result.lifecycleSignals = lifecycleSignals
-    result.hardFailure = result.hardFailure || lifecycleSignals.length > 0 || Boolean(exited)
   } catch (error) {
-    result = {
-      error: error instanceof Error ? (error.stack ?? error.message) : String(error),
-      hardFailure: true,
-      lifecycleSignals: [],
-      maxGapMs: OUTER_WATCHDOG_MS,
-      maxOperationMs: OUTER_WATCHDOG_MS,
-      operations: []
-    }
+    result = resultForError(error)
     processSnapshot(join(runDir, 'failure-processes.txt'), child.pid)
     sampleTree(runDir, child.pid, 'failure')
     if (cdp) {
@@ -828,15 +858,33 @@ async function executeRun(target, index, warmup, mock, output) {
     }
   } finally {
     cdp?.close()
+    const logText = existsSync(desktopLog) ? readFileSync(desktopLog, 'utf8') : ''
+    const lifecycleSignals = logText
+      .split(/\r?\n/)
+      .filter(line => /webContents became unresponsive|render-process-gone/i.test(line))
+    const lifecycleReproduced = lifecycleSignals.length > 0 || Boolean(exited && !spawnFailed)
+
+    result.lifecycleSignals = lifecycleSignals
+
+    if (lifecycleReproduced) {
+      result.hardFailure = true
+      result.outcome = 'reproduced'
+    }
+
     stopping = true
     const teardown = await stopProcessTree(child.pid)
     writeFileSync(join(runDir, 'teardown.json'), `${JSON.stringify(teardown, null, 2)}\n`)
+
+    if (existsSync(desktopLog)) {
+      copyFileSync(desktopLog, join(runDir, 'desktop.log'))
+    }
 
     if (teardown.remainingAfterKill.length > 0) {
       result = {
         ...(result ?? {}),
         error: `${result?.error ? `${result.error}\n` : ''}process teardown leaked PIDs ${teardown.remainingAfterKill.join(', ')}`,
-        hardFailure: true
+        hardFailure: true,
+        outcome: result?.outcome === 'reproduced' ? 'reproduced' : 'harness-error'
       }
     }
   }
@@ -847,13 +895,20 @@ async function executeRun(target, index, warmup, mock, output) {
   return result
 }
 
-function classify(results) {
-  const reproduced = results.filter(result => result.hardFailure).length
+function classify(results, warmup) {
+  const invalid = [warmup, ...results].some(result => result.outcome === 'harness-error')
+  const reproduced = results.filter(result => result.outcome === 'reproduced').length
   const reproducedThreshold = Math.ceil(results.length * 0.8)
 
   return {
-    classification:
-      reproduced >= reproducedThreshold ? 'reproduced' : reproduced === 0 ? 'not-reproduced' : 'intermittent',
+    classification: invalid
+      ? 'invalid'
+      : reproduced >= reproducedThreshold
+        ? 'reproduced'
+        : reproduced === 0
+          ? 'not-reproduced'
+          : 'intermittent',
+    invalid,
     reproduced,
     reproducedThreshold,
     total: results.length
@@ -861,6 +916,14 @@ function classify(results) {
 }
 
 function pairedSoftSignal(baseline, candidate) {
+  if (baseline.length === 0 || candidate.length === 0) {
+    return { material: false, materialPairs: 0, materialThreshold: 0, reason: 'insufficient-runs', thresholdPct: 30 }
+  }
+
+  if ([...baseline, ...candidate].some(result => result.outcome !== 'not-reproduced')) {
+    return { material: false, materialPairs: 0, materialThreshold: 0, reason: 'hard-or-invalid-run', thresholdPct: 30 }
+  }
+
   let materialPairs = 0
 
   for (let i = 0; i < Math.min(baseline.length, candidate.length); i += 1) {
@@ -898,10 +961,46 @@ function validateArtifactBundle(output, repetitions) {
 
   const summary = JSON.parse(readFileSync(join(output, 'summary.json'), 'utf8'))
 
+  validateSummary(summary, repetitions)
+}
+
+function validateSummary(summary, repetitions) {
+  if (!Number.isInteger(repetitions) || repetitions < 1 || repetitions > 20) {
+    throw new Error('invalid summary repetitions')
+  }
+
+  let invalid = false
+
   for (const label of ['baseline', 'candidate']) {
     if (!summary[label]?.warmup || summary[label].runs?.length !== repetitions) {
       throw new Error(`invalid ${label} summary shape`)
     }
+
+    for (const result of [summary[label].warmup, ...summary[label].runs]) {
+      if (!['harness-error', 'not-reproduced', 'reproduced'].includes(result.outcome)) {
+        throw new Error(`invalid ${label} run outcome`)
+      }
+
+      const expectedHardFailure = result.outcome !== 'not-reproduced'
+
+      if (result.hardFailure !== expectedHardFailure) {
+        throw new Error(`inconsistent ${label} run outcome and hardFailure`)
+      }
+    }
+
+    const derived = classify(summary[label].runs, summary[label].warmup)
+
+    for (const field of ['classification', 'invalid', 'reproduced', 'reproducedThreshold', 'total']) {
+      if (summary[label][field] !== derived[field]) {
+        throw new Error(`inconsistent ${label} summary ${field}`)
+      }
+    }
+
+    invalid ||= derived.invalid
+  }
+
+  if (summary.invalid !== invalid) {
+    throw new Error('inconsistent summary invalid state')
   }
 }
 
@@ -993,16 +1092,22 @@ async function main() {
       }
     }
 
+    const baselineClassification = classify(measured.baseline, warmups.baseline)
+    const candidateClassification = classify(measured.candidate, warmups.candidate)
+    const invalid = baselineClassification.invalid || candidateClassification.invalid
     const summary = {
       ...plan,
-      baseline: { ...plan.baseline, ...classify(measured.baseline), runs: measured.baseline, warmup: warmups.baseline },
+      invalid,
+      baseline: { ...plan.baseline, ...baselineClassification, runs: measured.baseline, warmup: warmups.baseline },
       candidate: {
         ...plan.candidate,
-        ...classify(measured.candidate),
+        ...candidateClassification,
         runs: measured.candidate,
         warmup: warmups.candidate
       },
-      softSignal: pairedSoftSignal(measured.baseline, measured.candidate)
+      softSignal: invalid
+        ? { material: false, materialPairs: 0, materialThreshold: 0, reason: 'invalid-run', thresholdPct: 30 }
+        : pairedSoftSignal(measured.baseline, measured.candidate)
     }
     writeFileSync(join(options.output, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
     validateArtifactBundle(options.output, options.repetitions)
@@ -1035,7 +1140,21 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
-  process.exitCode = 2
-})
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  main().catch(error => {
+    console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
+    process.exitCode = 2
+  })
+}
+
+export {
+  ReproductionError,
+  classify,
+  pairedSoftSignal,
+  resultForError,
+  validateArtifactBundle,
+  validateSummary,
+  waitFor,
+  withTemporarySandbox,
+  withTimeout
+}
