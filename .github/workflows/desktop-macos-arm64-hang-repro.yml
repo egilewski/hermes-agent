@@ -6,12 +6,12 @@ on:
       baseline_ref:
         description: Baseline commit or ref
         required: true
-        default: 15dc65eeda397a5d4d35edd6779141eeb8139944
+        default: 93c97073d857230b7de095b7885e25a3be0306fa
         type: string
       candidate_ref:
         description: Candidate commit or ref
         required: true
-        default: 15dc65eeda397a5d4d35edd6779141eeb8139944
+        default: 93c97073d857230b7de095b7885e25a3be0306fa
         type: string
       repetitions:
         description: Measured repetitions per ref after one warm-up
@@ -36,10 +36,10 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      BASELINE_REF: ${{ inputs.baseline_ref || '15dc65eeda397a5d4d35edd6779141eeb8139944' }}
+      BASELINE_REF: ${{ inputs.baseline_ref || '93c97073d857230b7de095b7885e25a3be0306fa' }}
       # A push publishes the diagnostic harness, not a product candidate.
       # Repeat the exact current-main snapshot in both counterbalanced slots.
-      CANDIDATE_REF: ${{ inputs.candidate_ref || '15dc65eeda397a5d4d35edd6779141eeb8139944' }}
+      CANDIDATE_REF: ${{ inputs.candidate_ref || '93c97073d857230b7de095b7885e25a3be0306fa' }}
       REPETITIONS: ${{ inputs.repetitions || '5' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

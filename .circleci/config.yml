@@ -9,8 +9,8 @@ jobs:
       xcode: 26.4.0
     resource_class: m4pro.medium
     environment:
-      BASELINE_REF: 15dc65eeda397a5d4d35edd6779141eeb8139944
-      CANDIDATE_REF: 15dc65eeda397a5d4d35edd6779141eeb8139944
+      BASELINE_REF: 93c97073d857230b7de095b7885e25a3be0306fa
+      CANDIDATE_REF: 93c97073d857230b7de095b7885e25a3be0306fa
       REPETITIONS: '5'
       CI: 'true'
       NOUS_API_KEY: ''
