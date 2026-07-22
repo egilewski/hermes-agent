@@ -195,7 +195,8 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
       const bounded = Math.min(fixtures.length, Math.max(1, Math.trunc(count)))
       const next = fixtures.slice(0, bounded).flatMap(fixture => fixture.messages)
       const expectedUserIds = next.filter(message => message.role === 'user').map(message => message.id)
-      const expectedAssistantMessages = next.filter(message => message.role === 'assistant').length
+      const expectedAssistantIds = next.filter(message => message.role === 'assistant').map(message => message.id)
+      const expectedAssistantMessages = expectedAssistantIds.length
       const expectedTools = next.flatMap(message => message.parts).filter(part => part.type === 'tool-call').length
 
       const expectedCodeCards = next
@@ -220,12 +221,26 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
         return element ? isPainted(element) : false
       })
 
-      const paintedAssistantMessages = [
-        ...document.querySelectorAll('[data-slot="aui_assistant-message-root"]')
-      ].filter(element => isPainted(element) && Boolean(element.textContent?.trim())).length
+      const assistantRoots = [
+        ...new Set(
+          expectedUserIds.flatMap(id => {
+            const user = document.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
+            const turn = user?.closest('[data-slot="aui_turn-pair"]')
 
-      const paintedTools = [...document.querySelectorAll('[data-tool-row]')].filter(isPainted).length
-      const paintedCodeCards = [...document.querySelectorAll('[data-slot="code-card"]')].filter(isPainted).length
+            return turn ? [...turn.querySelectorAll('[data-slot="aui_assistant-message-root"]')] : []
+          })
+        )
+      ]
+
+      const paintedAssistantMessages = assistantRoots.filter(
+        element => isPainted(element) && Boolean(element.textContent?.trim())
+      ).length
+      const paintedTools = assistantRoots
+        .flatMap(root => [...root.querySelectorAll('[data-tool-row]')])
+        .filter(isPainted).length
+      const paintedCodeCards = assistantRoots
+        .flatMap(root => [...root.querySelectorAll('[data-slot="code-card"]')])
+        .filter(isPainted).length
 
       return {
         expectedAssistantMessages,
