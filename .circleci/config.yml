@@ -1,0 +1,84 @@
+version: 2.1
+
+orbs:
+  node: circleci/node@7.2.1
+
+jobs:
+  desktop-macos-arm64-hang-repro:
+    macos:
+      xcode: 26.4.0
+    resource_class: m4pro.medium
+    environment:
+      BASELINE_REF: c6f9e0c748677fcc46f62b71cc99a9069239de5b
+      CANDIDATE_REF: refs/pull/69275/head
+      REPETITIONS: '5'
+      CI: 'true'
+      NOUS_API_KEY: ''
+      OPENAI_API_KEY: ''
+      OPENROUTER_API_KEY: ''
+    steps:
+      - checkout
+
+      - node/install:
+          node-version: 22.23.1
+
+      - run:
+          name: Install JavaScript dependencies
+          command: npm ci
+
+      - run:
+          name: Install uv and Python runtime
+          command: |
+            uv_tmp="$(mktemp -d)"
+            curl --proto '=https' --tlsv1.2 -LfsS \
+              https://github.com/astral-sh/uv/releases/download/0.11.31/uv-aarch64-apple-darwin.tar.gz \
+              -o "$uv_tmp/uv.tar.gz"
+            printf '%s  %s\n' \
+              b2b93e82a6786f9c7cb89fd4ca0e859a147b292ae8f6f95784f9742f0efec39e \
+              "$uv_tmp/uv.tar.gz" | shasum -a 256 -c -
+            tar -xzf "$uv_tmp/uv.tar.gz" -C "$uv_tmp"
+            mkdir -p "$HOME/.local/bin"
+            install -m 0755 "$uv_tmp/uv-aarch64-apple-darwin/uv" "$HOME/.local/bin/uv"
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            uv python install 3.11
+            uv sync --locked --python 3.11 --extra all --extra dev
+
+      - run:
+          name: Verify Apple-silicon macOS executor
+          command: |
+            test "$(uname -s)" = Darwin
+            test "$(uname -m)" = arm64
+            sw_vers
+            sysctl -n machdep.cpu.brand_string
+
+      - run:
+          name: Run counterbalanced A/B diagnostic
+          no_output_timeout: 30m
+          command: |
+            npm run --prefix apps/desktop repro:short-session-hang -- \
+              --baseline "$BASELINE_REF" \
+              --candidate "$CANDIDATE_REF" \
+              --repetitions "$REPETITIONS" \
+              --output "$PWD/short-session-hang-artifacts"
+
+      - store_artifacts:
+          path: short-session-hang-artifacts
+          destination: desktop-macos-arm64-hang
+
+      - run:
+          name: Validate diagnostic summary
+          when: always
+          command: |
+            node -e "const fs=require('node:fs'); const p='short-session-hang-artifacts/summary.json'; if(!fs.existsSync(p)) throw new Error('missing '+p); const s=JSON.parse(fs.readFileSync(p,'utf8')); const repetitions=Number(process.env.REPETITIONS); if(!Number.isInteger(repetitions)||repetitions<1) throw new Error('invalid repetitions'); for(const label of ['baseline','candidate']) { const result=s[label]; if(!result || typeof result.warmup?.hardFailure!=='boolean' || !Array.isArray(result.runs) || result.runs.length!==repetitions || result.runs.some(run=>typeof run?.hardFailure!=='boolean')) throw new Error('invalid '+label+' summary') }"
+
+workflows:
+  issue-63047-macos-arm64:
+    jobs:
+      - desktop-macos-arm64-hang-repro:
+          filters:
+            branches:
+              only:
+                - codex/test-macos-arm64-63047
+            tags:
+              ignore: /.*/
