@@ -6,12 +6,12 @@ on:
       baseline_ref:
         description: Baseline commit or ref
         required: true
-        default: c6f9e0c748677fcc46f62b71cc99a9069239de5b
+        default: 15dc65eeda397a5d4d35edd6779141eeb8139944
         type: string
       candidate_ref:
         description: Candidate commit or ref
         required: true
-        default: refs/pull/69275/head
+        default: 15dc65eeda397a5d4d35edd6779141eeb8139944
         type: string
       repetitions:
         description: Measured repetitions per ref after one warm-up
@@ -36,11 +36,10 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      BASELINE_REF: ${{ inputs.baseline_ref || 'c6f9e0c748677fcc46f62b71cc99a9069239de5b' }}
-      # A push publishes this diagnostic harness, not the candidate product
-      # change. Keep the A/B target on the exact upstream PR head; using
-      # github.sha here would compare the harness branch instead of #69275.
-      CANDIDATE_REF: ${{ inputs.candidate_ref || 'refs/pull/69275/head' }}
+      BASELINE_REF: ${{ inputs.baseline_ref || '15dc65eeda397a5d4d35edd6779141eeb8139944' }}
+      # A push publishes the diagnostic harness, not a product candidate.
+      # Repeat the exact current-main snapshot in both counterbalanced slots.
+      CANDIDATE_REF: ${{ inputs.candidate_ref || '15dc65eeda397a5d4d35edd6779141eeb8139944' }}
       REPETITIONS: ${{ inputs.repetitions || '5' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
