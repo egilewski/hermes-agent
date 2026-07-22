@@ -1,0 +1,99 @@
+name: Desktop macOS arm64 short-session hang diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Baseline commit or ref
+        required: true
+        default: c6f9e0c748677fcc46f62b71cc99a9069239de5b
+        type: string
+      candidate_ref:
+        description: Candidate commit or ref
+        required: true
+        default: refs/pull/69275/head
+        type: string
+      repetitions:
+        description: Measured repetitions per ref after one warm-up
+        required: true
+        default: '5'
+        type: string
+  push:
+    branches:
+      - codex/test-macos-arm64-63047
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-arm64-hang-repro-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    name: A/B macOS 26 arm64 diagnostic
+    # GitHub's hosted-runner reference lists macos-26 as an arm64 M1 label.
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      BASELINE_REF: ${{ inputs.baseline_ref || 'c6f9e0c748677fcc46f62b71cc99a9069239de5b' }}
+      # A push publishes this diagnostic harness, not the candidate product
+      # change. Keep the A/B target on the exact upstream PR head; using
+      # github.sha here would compare the harness branch instead of #69275.
+      CANDIDATE_REF: ${{ inputs.candidate_ref || 'refs/pull/69275/head' }}
+      REPETITIONS: ${{ inputs.repetitions || '5' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python runtime
+        run: |
+          uv python install 3.11
+          uv sync --locked --python 3.11 --extra all --extra dev
+
+      - name: Run counterbalanced A/B diagnostic
+        run: |
+          npm run --prefix apps/desktop repro:short-session-hang -- \
+            --baseline "$BASELINE_REF" \
+            --candidate "$CANDIDATE_REF" \
+            --repetitions "$REPETITIONS" \
+            --output "$GITHUB_WORKSPACE/short-session-hang-artifacts"
+        env:
+          CI: 'true'
+          NOUS_API_KEY: ''
+          OPENAI_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+
+      - name: Upload diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-arm64-hang-${{ github.run_id }}-${{ github.run_attempt }}
+          path: short-session-hang-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+          overwrite: true
+
+      - name: Validate diagnostic summary
+        if: always()
+        run: |
+          node -e "const fs=require('node:fs'); const p='short-session-hang-artifacts/summary.json'; if(!fs.existsSync(p)) throw new Error('missing '+p); const s=JSON.parse(fs.readFileSync(p,'utf8')); const repetitions=Number(process.env.REPETITIONS); if(!Number.isInteger(repetitions)||repetitions<1) throw new Error('invalid repetitions'); for(const label of ['baseline','candidate']) { const result=s[label]; if(!result || typeof result.warmup?.hardFailure!=='boolean' || !Array.isArray(result.runs) || result.runs.length!==repetitions || result.runs.some(run=>typeof run?.hardFailure!=='boolean')) throw new Error('invalid '+label+' summary') }"
