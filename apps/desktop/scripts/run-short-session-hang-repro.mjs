@@ -665,7 +665,7 @@ async function runRealChatChecks(cdp, timed, measure, mock, runDir) {
     )
     const submitted = await timed(`real-chat.submit.${exchange}`, () =>
       cdp.eval(
-        `(() => { const button = document.querySelector('[data-slot="composer-root"] button[type="submit"]:not(:disabled)'); if (!button) return false; button.click(); return true })()`
+        `(() => { const button = document.querySelector('[data-slot="composer-root"] button[type="submit"]:not(:disabled)'); if (!button) return false; window.setTimeout(() => button.click(), 0); return true })()`
       )
     )
 
