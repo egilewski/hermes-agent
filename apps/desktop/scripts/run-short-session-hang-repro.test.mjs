@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   ReproductionError,
   classify,
+  enterKeyEvents,
   pairedSoftSignal,
   resultForError,
   validateSummary,
@@ -15,6 +16,20 @@ import {
   withTemporarySandbox,
   withTimeout
 } from './run-short-session-hang-repro.mjs'
+
+test('uses Chromium raw key events for Enter submission', () => {
+  assert.deepEqual(enterKeyEvents(), [
+    {
+      code: 'Enter',
+      key: 'Enter',
+      text: '\r',
+      type: 'rawKeyDown',
+      unmodifiedText: '\r',
+      windowsVirtualKeyCode: 13
+    },
+    { code: 'Enter', key: 'Enter', type: 'keyUp', windowsVirtualKeyCode: 13 }
+  ])
+})
 
 const result = (outcome, latency = 10) => ({
   hardFailure: outcome !== 'not-reproduced',
