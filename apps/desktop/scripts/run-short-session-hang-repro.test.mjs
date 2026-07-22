@@ -10,6 +10,8 @@ import {
   resultForError,
   validateSummary,
   waitFor,
+  waitForPredicate,
+  waitForResponsive,
   withTemporarySandbox,
   withTimeout
 } from './run-short-session-hang-repro.mjs'
@@ -63,6 +65,41 @@ test('preserves timeout semantics through the actual nested helpers', async () =
     ReproductionError
   )
   assert.equal(nearDeadline, 'responsive')
+})
+
+test('distinguishes a responsive false condition from a stalled renderer evaluation', async () => {
+  let transientEvaluations = 0
+  await waitForResponsive(
+    {
+      eval: async () => {
+        transientEvaluations += 1
+
+        if (transientEvaluations === 1) {
+          throw new Error('execution context was destroyed')
+        }
+
+        return true
+      }
+    },
+    'true',
+    500,
+    'transient condition',
+    50
+  )
+  assert.equal(transientEvaluations, 2)
+
+  await assert.rejects(
+    waitForResponsive({ eval: async () => false }, 'false', 10, 'responsive condition', 10),
+    error => !(error instanceof ReproductionError) && /renderer remained responsive/.test(error.message)
+  )
+  await assert.rejects(
+    waitForResponsive({ eval: () => new Promise(() => {}) }, 'false', 50, 'stalled condition', 10),
+    ReproductionError
+  )
+  await assert.rejects(
+    waitForPredicate(() => false, 10, 'provider request'),
+    /provider request/
+  )
 })
 
 test('invalidates a target when warmup or measured runs have harness errors', () => {

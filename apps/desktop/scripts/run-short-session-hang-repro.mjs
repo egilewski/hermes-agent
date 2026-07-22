@@ -528,7 +528,45 @@ function withTimeout(task, timeoutMs, label, ErrorType = Error) {
   ]).finally(() => clearTimeout(timer))
 }
 
-async function verifyInteractiveSurfaces(cdp, timed, label) {
+async function waitForResponsive(cdp, expression, timeoutMs, label, evaluationTimeoutMs = FREEZE_MS) {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    try {
+      if (
+        await withTimeout(cdp.eval(expression), evaluationTimeoutMs, `${label} renderer evaluation`, ReproductionError)
+      ) {
+        return
+      }
+    } catch (error) {
+      if (error instanceof ReproductionError) {
+        throw error
+      }
+
+      // Match the initial renderer-readiness polling: CDP can fail transiently while a document is replaced.
+    }
+
+    await sleep(Math.min(250, Math.max(1, deadline - Date.now())))
+  }
+
+  throw new Error(`timed out waiting for ${label} while the renderer remained responsive`)
+}
+
+async function waitForPredicate(predicate, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (await predicate()) {
+      return
+    }
+
+    await sleep(Math.min(100, Math.max(1, deadline - Date.now())))
+  }
+
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+async function verifyInteractiveSurfaces(cdp, timed, measure, label) {
   const sentinel = `short-session-sentinel-${label}`
   const composerPainted = await timed(`composer.paint.${label}`, async () => {
     const focused = await cdp.eval(
@@ -552,13 +590,12 @@ async function verifyInteractiveSurfaces(cdp, timed, label) {
 
   const version = await timed(`version.ipc.${label}`, () => cdp.eval('window.hermesDesktop.getVersion()'))
   await timed(`about.open.${label}`, () => cdp.eval("location.hash = '#/settings?tab=about'; true"))
-  await timed(`about.ready.${label}`, () =>
-    waitFor(
+  await measure(`about.ready.${label}`, () =>
+    waitForResponsive(
       cdp,
       `document.body.textContent.includes(${JSON.stringify(version.appVersion)}) && !!document.querySelector('button[aria-label]')`,
       FREEZE_MS,
-      `About settings at ${label}`,
-      ReproductionError
+      `About settings at ${label}`
     )
   )
   const aboutClosed = await timed(`about.close.${label}`, () =>
@@ -571,14 +608,8 @@ async function verifyInteractiveSurfaces(cdp, timed, label) {
     throw new Error(`About settings close control unavailable at ${label}`)
   }
 
-  await timed(`about.closed.${label}`, () =>
-    waitFor(
-      cdp,
-      "!location.hash.includes('/settings')",
-      FREEZE_MS,
-      `About settings close at ${label}`,
-      ReproductionError
-    )
+  await measure(`about.closed.${label}`, () =>
+    waitForResponsive(cdp, "!location.hash.includes('/settings')", FREEZE_MS, `About settings close at ${label}`)
   )
   const interactive = await timed(`transcript.interactive.${label}`, () =>
     cdp.eval(
@@ -593,48 +624,78 @@ async function verifyInteractiveSurfaces(cdp, timed, label) {
   return { sentinel, version }
 }
 
-async function runRealChatChecks(cdp, timed, mock, runDir) {
+async function runRealChatChecks(cdp, timed, measure, mock, runDir) {
   const requestCountBefore = mock.streamingCompletionRequests()
 
   for (let exchange = 1; exchange <= 5; exchange += 1) {
-    await timed(`real-chat.exchange.${exchange}`, async () => {
-      const beforeAssistant = await cdp.eval(
+    const beforeAssistant = await timed(`real-chat.assistant-count.${exchange}`, () =>
+      cdp.eval(
         `document.querySelectorAll('[data-slot="aui_assistant-message-root"]:not([data-streaming="true"])').length`
       )
-      const composer = await cdp.eval(
+    )
+    const composer = await timed(`real-chat.composer-focus.${exchange}`, () =>
+      cdp.eval(
         `(() => { const el = document.querySelector('[data-slot="composer-rich-input"]'); if (!el || el.contentEditable !== 'true') return false; el.focus(); return true })()`
       )
+    )
 
-      if (!composer) {
-        throw new Error(`real chat composer unavailable at exchange ${exchange}`)
-      }
+    if (!composer) {
+      throw new Error(`real chat composer unavailable at exchange ${exchange}`)
+    }
 
-      const prompt = `Deterministic real chat exchange ${exchange}`
-      await cdp.send('Input.insertText', { text: prompt })
-      const inserted = await cdp.eval(
+    const prompt = `Deterministic real chat exchange ${exchange}`
+    await timed(`real-chat.insert.${exchange}`, () => cdp.send('Input.insertText', { text: prompt }))
+    const inserted = await timed(`real-chat.inserted.${exchange}`, () =>
+      cdp.eval(
         `document.querySelector('[data-slot="composer-rich-input"]')?.textContent?.includes(${JSON.stringify(prompt)}) === true`
       )
+    )
 
-      if (!inserted) {
-        throw new Error(`real chat prompt did not reach the composer at exchange ${exchange}`)
-      }
+    if (!inserted) {
+      throw new Error(`real chat prompt did not reach the composer at exchange ${exchange}`)
+    }
 
-      const enter = { code: 'Enter', key: 'Enter', nativeVirtualKeyCode: 36, windowsVirtualKeyCode: 13 }
-      await cdp.send('Input.dispatchKeyEvent', { ...enter, type: 'keyDown' })
-      await cdp.send('Input.dispatchKeyEvent', { ...enter, type: 'keyUp' })
+    const enter = { code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }
+    await timed(`real-chat.enter-down.${exchange}`, () =>
+      cdp.send('Input.dispatchKeyEvent', { ...enter, text: '\r', type: 'keyDown', unmodifiedText: '\r' })
+    )
+    await timed(`real-chat.enter-up.${exchange}`, () => cdp.send('Input.dispatchKeyEvent', { ...enter, type: 'keyUp' }))
 
-      await waitFor(
+    try {
+      await measure(`real-chat.mock-request.${exchange}`, () =>
+        waitForPredicate(
+          () => mock.streamingCompletionRequests() >= requestCountBefore + exchange,
+          FREEZE_MS,
+          `mock inference request ${exchange}`
+        )
+      )
+    } catch (error) {
+      const state = await timed(`real-chat.dispatch-probe.${exchange}`, () =>
+        cdp.eval(`({
+          assistantMessages: document.querySelectorAll('[data-slot="aui_assistant-message-root"]').length,
+          composerText: document.querySelector('[data-slot="composer-rich-input"]')?.textContent ?? null,
+          harness: window.__SHORT_SESSION_HANG_REPRO__.summary(),
+          userMessages: document.querySelectorAll('[data-slot="aui_user-message-root"]').length
+        })`)
+      )
+
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; dispatch probe responded with state: ${JSON.stringify(state)}`
+      )
+    }
+
+    await measure(`real-chat.assistant-response.${exchange}`, () =>
+      waitForResponsive(
         cdp,
         `document.querySelectorAll('[data-slot="aui_assistant-message-root"]:not([data-streaming="true"])').length > ${beforeAssistant}`,
         FREEZE_MS,
-        `real assistant response ${exchange}`,
-        ReproductionError
+        `real assistant response ${exchange}`
       )
+    )
 
-      if (mock.streamingCompletionRequests() < requestCountBefore + exchange) {
-        throw new Error(`mock inference request count did not advance for exchange ${exchange}`)
-      }
-    })
+    if (mock.streamingCompletionRequests() < requestCountBefore + exchange) {
+      throw new Error(`mock inference request count did not advance for exchange ${exchange}`)
+    }
   }
 
   const requestDelta = mock.streamingCompletionRequests() - requestCountBefore
@@ -643,7 +704,7 @@ async function runRealChatChecks(cdp, timed, mock, runDir) {
     throw new Error(`expected exactly 5 mock completion requests, observed ${requestDelta}`)
   }
 
-  const surfaces = await verifyInteractiveSurfaces(cdp, timed, 'real-chat-exchange-5')
+  const surfaces = await verifyInteractiveSurfaces(cdp, timed, measure, 'real-chat-exchange-5')
   await withTimeout(screenshot(cdp, join(runDir, 'real-chat-exchange-5.png')), 2_000, 'real chat screenshot')
 
   return {
@@ -657,20 +718,22 @@ async function runRealChatChecks(cdp, timed, mock, runDir) {
 
 async function runRendererChecks(cdp, label, runDir, mock) {
   const operations = []
-  const timed = async (name, body) => {
+  const measure = async (name, body) => {
     const started = performance.now()
-    const value = await withTimeout(Promise.resolve().then(body), FREEZE_MS, name, ReproductionError)
+    const value = await Promise.resolve().then(body)
     const latencyMs = performance.now() - started
     operations.push({ name, latencyMs })
 
     return value
   }
+  const timed = (name, body) =>
+    measure(name, () => withTimeout(Promise.resolve().then(body), FREEZE_MS, name, ReproductionError))
 
   await cdp.send('Runtime.enable')
   await cdp.send('Profiler.enable')
   await cdp.send('Profiler.start')
   await timed('harness.reset', () => cdp.eval('window.__SHORT_SESSION_HANG_REPRO__.reset()'))
-  const realChat = await runRealChatChecks(cdp, timed, mock, runDir)
+  const realChat = await runRealChatChecks(cdp, timed, measure, mock, runDir)
   const fixtureManifest = await timed('fixture.manifest', () =>
     cdp.eval('window.__SHORT_SESSION_HANG_REPRO__.manifest()')
   )
@@ -696,7 +759,7 @@ async function runRendererChecks(cdp, label, runDir, mock) {
       throw new Error(`checkpoint ${count} did not paint the complete synthetic transcript: ${JSON.stringify(loaded)}`)
     }
 
-    const surfaces = await verifyInteractiveSurfaces(cdp, timed, `renderer-only-turn-${count}`)
+    const surfaces = await verifyInteractiveSurfaces(cdp, timed, measure, `renderer-only-turn-${count}`)
     await withTimeout(
       screenshot(cdp, join(runDir, `renderer-only-turn-${count}.png`)),
       2_000,
@@ -1155,6 +1218,8 @@ export {
   validateArtifactBundle,
   validateSummary,
   waitFor,
+  waitForPredicate,
+  waitForResponsive,
   withTemporarySandbox,
   withTimeout
 }
