@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync,
   copyFileSync,
+  createWriteStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,6 +18,7 @@ import http from 'node:http'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { finished } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 import { CDP, discoverTarget, sleep } from './perf/lib/cdp.mjs'
@@ -762,6 +764,12 @@ async function runRendererChecks(cdp, label, runDir, mock) {
       continue
     }
 
+    if (loaded.discoveredAssistantMessages !== loaded.expectedAssistantMessages) {
+      throw new Error(
+        `checkpoint ${count} discovered ${loaded.discoveredAssistantMessages} fixture assistant roots; expected ${loaded.expectedAssistantMessages}: ${JSON.stringify(loaded)}`
+      )
+    }
+
     if (
       loaded.paintedUserIds.length !== loaded.expectedUserIds.length ||
       loaded.paintedAssistantMessages !== loaded.expectedAssistantMessages ||
@@ -852,6 +860,16 @@ async function executeRunInSandbox(target, index, warmup, mock, output, sandbox)
   writeSandboxConfig(hermesHome, mock.url)
 
   const electron = require('electron')
+  const stdoutLog = createWriteStream(stdoutPath)
+  const stderrLog = createWriteStream(stderrPath)
+  const stdoutFlushed = finished(stdoutLog).then(
+    () => null,
+    error => error
+  )
+  const stderrFlushed = finished(stderrLog).then(
+    () => null,
+    error => error
+  )
   const child = spawn(
     electron,
     [
@@ -895,8 +913,8 @@ async function executeRunInSandbox(target, index, warmup, mock, output, sandbox)
     )
     rejectSpawn(error)
   })
-  child.stdout.on('data', chunk => appendFileSync(stdoutPath, chunk))
-  child.stderr.on('data', chunk => appendFileSync(stderrPath, chunk))
+  child.stdout.pipe(stdoutLog)
+  child.stderr.pipe(stderrLog)
   child.once('exit', (code, signal) => {
     exited = { code, signal }
     appendFileSync(
@@ -948,6 +966,11 @@ async function executeRunInSandbox(target, index, warmup, mock, output, sandbox)
 
     stopping = true
     const teardown = await stopProcessTree(child.pid)
+    const logFlushErrors = await withTimeout(
+      Promise.all([stdoutFlushed, stderrFlushed]),
+      FREEZE_MS,
+      'Electron log flush'
+    ).catch(error => [error])
     writeFileSync(join(runDir, 'teardown.json'), `${JSON.stringify(teardown, null, 2)}\n`)
 
     if (existsSync(desktopLog)) {
@@ -958,6 +981,17 @@ async function executeRunInSandbox(target, index, warmup, mock, output, sandbox)
       result = {
         ...(result ?? {}),
         error: `${result?.error ? `${result.error}\n` : ''}process teardown leaked PIDs ${teardown.remainingAfterKill.join(', ')}`,
+        hardFailure: true,
+        outcome: result?.outcome === 'reproduced' ? 'reproduced' : 'harness-error'
+      }
+    }
+
+    const logFlushError = logFlushErrors.find(Boolean)
+
+    if (logFlushError) {
+      result = {
+        ...(result ?? {}),
+        error: `${result?.error ? `${result.error}\n` : ''}Electron log flush failed: ${logFlushError instanceof Error ? logFlushError.message : String(logFlushError)}`,
         hardFailure: true,
         outcome: result?.outcome === 'reproduced' ? 'reproduced' : 'harness-error'
       }

@@ -18,6 +18,7 @@ interface ShortSessionDriver {
   fixtures: FixtureTurn[]
   heartbeatSamples: HeartbeatSample[]
   load: (count: number) => Promise<{
+    discoveredAssistantMessages: number
     expectedAssistantMessages: number
     expectedCodeCards: number
     expectedTools: number
@@ -232,17 +233,26 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
         )
       ]
 
-      const paintedAssistantMessages = assistantRoots.filter(
-        element => isPainted(element) && Boolean(element.textContent?.trim())
-      ).length
       const paintedTools = assistantRoots
         .flatMap(root => [...root.querySelectorAll('[data-tool-row]')])
         .filter(isPainted).length
       const paintedCodeCards = assistantRoots
         .flatMap(root => [...root.querySelectorAll('[data-slot="code-card"]')])
         .filter(isPainted).length
+      const paintedAssistantMessages = assistantRoots.filter(root => {
+        if (!isPainted(root)) {
+          return false
+        }
+
+        const hasText = Boolean(root.textContent?.trim())
+        const hasPaintedTool = [...root.querySelectorAll('[data-tool-row]')].some(isPainted)
+        const hasPaintedCode = [...root.querySelectorAll('[data-slot="code-card"]')].some(isPainted)
+
+        return hasText || hasPaintedTool || hasPaintedCode
+      }).length
 
       return {
+        discoveredAssistantMessages: assistantRoots.length,
         expectedAssistantMessages,
         expectedCodeCards,
         expectedTools,
