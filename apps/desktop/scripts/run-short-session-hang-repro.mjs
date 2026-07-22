@@ -566,15 +566,6 @@ async function waitForPredicate(predicate, timeoutMs, label) {
   throw new Error(`timed out waiting for ${label}`)
 }
 
-function enterKeyEvents() {
-  const enter = { code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }
-
-  return [
-    { ...enter, text: '\r', type: 'rawKeyDown', unmodifiedText: '\r' },
-    { ...enter, type: 'keyUp' }
-  ]
-}
-
 async function verifyInteractiveSurfaces(cdp, timed, measure, label) {
   const sentinel = `short-session-sentinel-${label}`
   const composerPainted = await timed(`composer.paint.${label}`, async () => {
@@ -664,9 +655,23 @@ async function runRealChatChecks(cdp, timed, measure, mock, runDir) {
       throw new Error(`real chat prompt did not reach the composer at exchange ${exchange}`)
     }
 
-    const [enterDown, enterUp] = enterKeyEvents()
-    await timed(`real-chat.enter-down.${exchange}`, () => cdp.send('Input.dispatchKeyEvent', enterDown))
-    await timed(`real-chat.enter-up.${exchange}`, () => cdp.send('Input.dispatchKeyEvent', enterUp))
+    await measure(`real-chat.submit-ready.${exchange}`, () =>
+      waitForResponsive(
+        cdp,
+        `!!document.querySelector('[data-slot="composer-root"] button[type="submit"]:not(:disabled)')`,
+        FREEZE_MS,
+        `real chat submit control ${exchange}`
+      )
+    )
+    const submitted = await timed(`real-chat.submit.${exchange}`, () =>
+      cdp.eval(
+        `(() => { const button = document.querySelector('[data-slot="composer-root"] button[type="submit"]:not(:disabled)'); if (!button) return false; button.click(); return true })()`
+      )
+    )
+
+    if (!submitted) {
+      throw new Error(`real chat submit control unavailable at exchange ${exchange}`)
+    }
 
     try {
       await measure(`real-chat.mock-request.${exchange}`, () =>
@@ -1220,7 +1225,6 @@ if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
 export {
   ReproductionError,
   classify,
-  enterKeyEvents,
   pairedSoftSignal,
   resultForError,
   validateArtifactBundle,
