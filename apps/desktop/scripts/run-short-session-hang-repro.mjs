@@ -599,6 +599,12 @@ async function runRealChatChecks(cdp, timed, mock, runDir) {
       }
 
       await cdp.send('Input.insertText', { text: `Deterministic real chat exchange ${exchange}` })
+      await waitFor(
+        cdp,
+        `(() => { const root = document.querySelector('[data-slot="composer-root"]'); const button = root?.querySelector('button[type="submit"]'); return Boolean(button && !button.disabled) })()`,
+        FREEZE_MS,
+        `real chat submit readiness ${exchange}`
+      )
       const submitted = await cdp.eval(
         `(() => { const root = document.querySelector('[data-slot="composer-root"]'); const button = root?.querySelector('button[type="submit"]'); if (!button || button.disabled) return false; button.click(); return true })()`
       )
