@@ -137,7 +137,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
   let sampleWindowStartedAt = performance.now()
 
   const record = (sample: HeartbeatSample) => {
-    if (sample.at < sampleWindowStartedAt) {
+    if (document.visibilityState !== 'visible' || sample.at < sampleWindowStartedAt) {
       return
     }
 
@@ -150,17 +150,81 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
 
   window.setInterval(() => {
     const now = performance.now()
-    record({ at: now, gapMs: now - lastInterval, source: 'interval' })
+
+    if (document.visibilityState === 'visible') {
+      record({ at: now, gapMs: now - lastInterval, source: 'interval' })
+    }
+
     lastInterval = now
   }, HEARTBEAT_INTERVAL_MS)
 
   const frame = (now: number) => {
-    record({ at: now, gapMs: now - lastFrame, source: 'animation-frame' })
+    if (document.visibilityState === 'visible') {
+      record({ at: now, gapMs: now - lastFrame, source: 'animation-frame' })
+    }
+
     lastFrame = now
     requestAnimationFrame(frame)
   }
 
   requestAnimationFrame(frame)
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const now = performance.now()
+      lastInterval = now
+      lastFrame = now
+    }
+  })
+
+  const afterTwoFramesWhileVisible = () =>
+    new Promise<void>((resolve, reject) => {
+      if (document.visibilityState !== 'visible') {
+        reject(new Error('renderer became hidden before paint validation'))
+
+        return
+      }
+
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      }
+      const onVisibilityChange = () => {
+        if (document.visibilityState !== 'visible') {
+          finish(new Error('renderer became hidden during paint validation'))
+        }
+      }
+
+      document.addEventListener('visibilitychange', onVisibilityChange)
+      requestAnimationFrame(() => {
+        if (document.visibilityState !== 'visible') {
+          finish(new Error('renderer became hidden before the first paint frame'))
+
+          return
+        }
+
+        requestAnimationFrame(() => {
+          if (document.visibilityState !== 'visible') {
+            finish(new Error('renderer became hidden before the second paint frame'))
+
+            return
+          }
+
+          finish()
+        })
+      })
+    })
 
   try {
     const observer = new PerformanceObserver(list => {
@@ -208,7 +272,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
       setBusy(false)
       setMessages(next)
 
-      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      await afterTwoFramesWhileVisible()
 
       const isPainted = (element: Element) => {
         const style = getComputedStyle(element)

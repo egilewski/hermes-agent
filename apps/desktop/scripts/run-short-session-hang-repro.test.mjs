@@ -67,7 +67,7 @@ test('preserves timeout semantics through the actual nested helpers', async () =
   assert.equal(nearDeadline, 'responsive')
 })
 
-test('distinguishes a responsive false condition from a stalled renderer evaluation', async () => {
+test('distinguishes a responsive false condition from a stalled renderer evaluation', { timeout: 2_000 }, async () => {
   let transientEvaluations = 0
   await waitForResponsive(
     {

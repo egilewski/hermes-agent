@@ -263,7 +263,19 @@ function prepareTarget(label, sha, root, output) {
 function startMockInference() {
   const reply = 'Deterministic local short-session diagnostic response.'
   let streamingCompletionRequests = 0
+  let listening = false
+  const transportErrors = []
+  const recordTransportError = (source, error) => {
+    transportErrors.push({
+      at: new Date().toISOString(),
+      message: error instanceof Error ? error.message : String(error),
+      source
+    })
+  }
   const server = http.createServer((request, response) => {
+    request.on('error', error => recordTransportError('request', error))
+    response.on('error', error => recordTransportError('response', error))
+
     if (request.method === 'GET' && request.url === '/v1/models') {
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ data: [{ id: 'short-session-model', object: 'model' }], object: 'list' }))
@@ -315,7 +327,13 @@ function startMockInference() {
   })
 
   return new Promise((resolveStart, reject) => {
-    server.once('error', reject)
+    server.on('error', error => {
+      recordTransportError('server', error)
+
+      if (!listening) {
+        reject(error)
+      }
+    })
     server.listen(0, '127.0.0.1', () => {
       const address = server.address()
 
@@ -325,9 +343,11 @@ function startMockInference() {
         return
       }
 
+      listening = true
       resolveStart({
         url: `http://127.0.0.1:${address.port}`,
         streamingCompletionRequests: () => streamingCompletionRequests,
+        transportErrors: () => transportErrors.map(error => ({ ...error })),
         close: () => new Promise(resolveClose => server.close(() => resolveClose()))
       })
     })
@@ -1216,7 +1236,8 @@ async function main() {
       },
       softSignal: invalid
         ? { material: false, materialPairs: 0, materialThreshold: 0, reason: 'invalid-run', thresholdPct: 30 }
-        : pairedSoftSignal(measured.baseline, measured.candidate)
+        : pairedSoftSignal(measured.baseline, measured.candidate),
+      mockTransportErrors: mock.transportErrors()
     }
     writeFileSync(join(options.output, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
     validateArtifactBundle(options.output, options.repetitions)
