@@ -948,13 +948,13 @@ async function executeRunInSandbox(target, index, warmup, mock, output, sandbox)
 
   try {
     await withTimeout(spawnReady, FREEZE_MS, 'Electron spawn')
-    const targetInfo = await discoverTarget({ port, timeoutMs: 90_000 })
-    cdp = await CDP.open(targetInfo.webSocketDebuggerUrl)
-    await waitFor(cdp, '!!window.__SHORT_SESSION_HANG_REPRO__', 90_000, 'short-session renderer harness')
-    await waitFor(
+    const targetInfo = await withTimeout(discoverTarget({ port, timeoutMs: 60_000 }), 65_000, 'CDP target discovery')
+    cdp = await withTimeout(CDP.open(targetInfo.webSocketDebuggerUrl), 10_000, 'CDP connection')
+    await waitForResponsive(cdp, '!!window.__SHORT_SESSION_HANG_REPRO__', 30_000, 'short-session renderer harness')
+    await waitForResponsive(
       cdp,
       `document.querySelector('[data-slot="composer-rich-input"]')?.contentEditable === 'true'`,
-      90_000,
+      20_000,
       'interactive composer'
     )
 
