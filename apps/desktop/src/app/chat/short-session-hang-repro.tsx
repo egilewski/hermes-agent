@@ -88,7 +88,7 @@ const fixtures: FixtureTurn[] = [
       toolName: 'read_file',
       type: 'tool-call'
     }
-  ] as ChatMessage['parts']),
+  ]),
   turn(4, 'mixed', [
     text(
       'Mixed response four starts with prose and a compact table.\n\n| field | value |\n|---|---|\n| stable | yes |'
@@ -102,7 +102,7 @@ const fixtures: FixtureTurn[] = [
       type: 'tool-call'
     },
     text('\nThe renderer must paint narration after the tool result.')
-  ] as ChatMessage['parts']),
+  ]),
   turn(5, 'plain', [text('Plain response five is the first required responsiveness checkpoint.')]),
   turn(6, 'code', [
     text('Code response six.\n\n```python\ndef heartbeat(now, previous):\n    return max(0, now - previous)\n```')
@@ -116,7 +116,7 @@ const fixtures: FixtureTurn[] = [
       toolName: 'search_files',
       type: 'tool-call'
     }
-  ] as ChatMessage['parts']),
+  ]),
   turn(8, 'mixed', [
     text('Mixed response eight is the final checkpoint. `inline code` and **markdown** remain interactive.'),
     {
@@ -127,7 +127,7 @@ const fixtures: FixtureTurn[] = [
       toolName: 'list_directory',
       type: 'tool-call'
     }
-  ] as ChatMessage['parts'])
+  ])
 ]
 
 if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
