@@ -134,6 +134,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
   const heartbeatSamples: HeartbeatSample[] = []
   let lastInterval = performance.now()
   let lastFrame = performance.now()
+  let maxGapMsSoFar = 0
   let sampleWindowStartedAt = performance.now()
 
   const record = (sample: HeartbeatSample) => {
@@ -141,6 +142,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
       return
     }
 
+    maxGapMsSoFar = Math.max(maxGapMsSoFar, sample.gapMs)
     heartbeatSamples.push(sample)
 
     if (heartbeatSamples.length > 2_000) {
@@ -245,6 +247,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
     setBusy(false)
     setMessages([])
     heartbeatSamples.length = 0
+    maxGapMsSoFar = 0
     lastInterval = now
     lastFrame = now
   }
@@ -357,7 +360,7 @@ if (typeof window !== 'undefined' && !window.__SHORT_SESSION_HANG_REPRO__) {
     },
     reset,
     summary: () => ({
-      maxGapMs: heartbeatSamples.reduce((max, sample) => Math.max(max, sample.gapMs), 0),
+      maxGapMs: maxGapMsSoFar,
       samples: [...heartbeatSamples]
     })
   }
