@@ -1938,6 +1938,13 @@ class TestBuildSchemaFromConfig:
         assert "python3.13" in runtime_entry["options"]
         assert len(runtime_entry["options"]) >= 3
 
+    def test_browser_force_sandbox_is_schema_registered(self):
+        from hermes_cli.web_server import CONFIG_SCHEMA
+
+        entry = CONFIG_SCHEMA["browser.force_sandbox"]
+        assert entry["type"] == "boolean"
+        assert "fail closed" in entry["description"]
+
 
 
     def test_timezone_field_is_searchable_select(self):

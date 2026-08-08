@@ -25,8 +25,10 @@ use ``build_editable``, which does NOT call ``bdist_wheel`` — it calls
 """
 
 import os
+from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
 
 _IN_NIX_BUILD = os.environ.get("HERMES_NIX_BUILD") == "1"
@@ -51,7 +53,30 @@ class _GuardedSdist(sdist):
         return super().run(*args, **kwargs)
 
 
-cmdclass = {"sdist": _GuardedSdist}
+class _ExecutableBrowserWrapperBuildPy(build_py):
+    """Preserve the native Chromium wrapper's executable install mode."""
+
+    def run(self, *args, **kwargs):
+        # PEP 660 maps packages directly from the source tree; build_py does
+        # not copy files into build_lib in editable mode. There is therefore
+        # no installed artifact to chmod or require here. The source wrapper's
+        # mode is unchanged, while regular wheel builds still enforce 0755 on
+        # their copied artifact below.
+        if getattr(self, "editable_mode", False):
+            return super().run(*args, **kwargs)
+
+        result = super().run(*args, **kwargs)
+        wrapper = Path(self.build_lib) / "tools" / "_sandboxed_chromium.py"
+        if not wrapper.is_file():
+            raise RuntimeError(f"built Chromium sandbox wrapper is missing: {wrapper}")
+        wrapper.chmod(0o755)
+        return result
+
+
+cmdclass = {
+    "sdist": _GuardedSdist,
+    "build_py": _ExecutableBrowserWrapperBuildPy,
+}
 
 # bdist_wheel is only available when the `wheel` package is installed.
 # setuptools.build_meta.build_wheel() calls it internally, so the guard

@@ -376,6 +376,32 @@ BROWSER_INACTIVITY_TIMEOUT=120
 AGENT_BROWSER_ARGS=--no-sandbox
 ```
 
+如需强制本地 Chromium 启用沙箱，请改用：
+
+```bash
+hermes config set browser.force_sandbox true
+```
+
+该命令会将行为设置写入 `config.yaml`（等同于
+`browser: {force_sandbox: true}`）。请使用非 root 用户运行，并将 Linux
+容器/主机配置为允许 Chromium 用户命名空间。如果沙箱无法初始化，Hermes
+会失败关闭，绝不会静默改用无沙箱模式重试。
+
+`browser.force_sandbox: true` 不能与 `AGENT_BROWSER_ARGS` 或旧版
+`AGENT_BROWSER_CHROME_FLAGS` 中禁用沙箱/进程隔离的参数一起使用，包括
+`--no-sandbox`、`--no-zygote-sandbox`、`--disable-setuid-sandbox`、
+`--disable-namespace-sandbox`、`--disable-gpu-sandbox`、
+`--disable-seccomp-filter-sandbox`、`--single-process` 和 `--in-process-gpu`。
+它只影响本地 Chromium；在非 Linux 系统上，启用该配置项会使本地浏览器命令报错，
+而不会启动浏览器。云 CDP provider 不会启动本地 Chromium 进程。
+Lightpanda 本身不会启动本地 Chromium，
+但其自动 Chrome 回退可能会启动；`browser.force_sandbox: true`
+同样会为该回退强制启用沙箱。
+
+`AGENT_BROWSER_FORCE_SANDBOX` 仅在 `browser.force_sandbox` 不存在时作为
+旧版/部署回退。显式配置值（包括 `false`）优先于该变量。新配置不要将此行为设置
+写入 `.env`。
+
 ### 安装 agent-browser CLI
 
 ```bash

@@ -412,6 +412,33 @@ BROWSER_INACTIVITY_TIMEOUT=120
 AGENT_BROWSER_ARGS=--no-sandbox
 ```
 
+To require sandboxed local Chromium instead:
+
+```bash
+hermes config set browser.force_sandbox true
+```
+
+This writes the behavioral setting to `config.yaml` (equivalent to
+`browser: {force_sandbox: true}`). Run as a non-root user and configure the
+Linux container/host to permit Chromium user namespaces. Hermes fails closed
+if the sandbox cannot initialize and never silently retries without it.
+
+`browser.force_sandbox: true` is incompatible with sandbox/process-isolation
+flags in `AGENT_BROWSER_ARGS` or legacy `AGENT_BROWSER_CHROME_FLAGS`:
+`--no-sandbox`, `--no-zygote-sandbox`, `--disable-setuid-sandbox`,
+`--disable-namespace-sandbox`, `--disable-gpu-sandbox`,
+`--disable-seccomp-filter-sandbox`, `--single-process`, and `--in-process-gpu`.
+It affects local Chromium only; on non-Linux systems, setting it makes local
+browser commands fail with an error instead of launching. Cloud CDP providers
+do not launch a local Chromium process.
+Lightpanda itself does not launch local Chromium, but its automatic Chrome
+fallback can, and `browser.force_sandbox: true` covers that fallback.
+
+`AGENT_BROWSER_FORCE_SANDBOX` remains a legacy/deployment fallback only when
+`browser.force_sandbox` is absent. An explicit config value, including `false`,
+overrides it. Do not put this behavioral setting in `.env` for new
+configurations.
+
 ### Install agent-browser CLI
 
 ```bash

@@ -121,6 +121,17 @@ class TestConfigYamlRouting:
         assert "vercel_runtime: python3.13" in config
         assert "TERMINAL_VERCEL_RUNTIME=python3.13" in env_content
 
+    def test_browser_force_sandbox_is_boolean_config_not_env(
+        self, _isolated_hermes_home
+    ):
+        import yaml
+
+        set_config_value("browser.force_sandbox", "true")
+
+        config = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert config["browser"]["force_sandbox"] is True
+        assert "AGENT_BROWSER_FORCE_SANDBOX" not in _read_env(_isolated_hermes_home)
+
 
 # ---------------------------------------------------------------------------
 # Empty / falsy values — regression tests for #4277

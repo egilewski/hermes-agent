@@ -1012,6 +1012,10 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "type": "boolean",
         "description": "Run the local browser in headed mode (visible window). Also keeps the window open between turns; idle sessions are still reaped after browser.inactivity_timeout.",
     },
+    "browser.force_sandbox": {
+        "type": "boolean",
+        "description": "Require sandboxed local Chromium on Linux and fail closed when the sandbox cannot be established.",
+    },
 }
 
 # Categories with fewer fields get merged into "general" to avoid tab sprawl.

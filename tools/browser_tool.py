@@ -264,6 +264,33 @@ DEFAULT_COMMAND_TIMEOUT = 30
 MIN_OPEN_TIMEOUT = 60
 MIN_FIRST_OPEN_TIMEOUT = 120
 
+_FORCE_CHROMIUM_SANDBOX_ENV = "AGENT_BROWSER_FORCE_SANDBOX"
+_FORCE_CHROMIUM_SANDBOX_LABEL = (
+    "browser.force_sandbox=true (or legacy AGENT_BROWSER_FORCE_SANDBOX=1)"
+)
+_UNSAFE_CHROMIUM_SANDBOX_ARGS = frozenset(
+    {
+        "--no-sandbox",
+        "--no-zygote-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-namespace-sandbox",
+        "--disable-gpu-sandbox",
+        "--disable-seccomp-filter-sandbox",
+        "--single-process",
+        "--in-process-gpu",
+    }
+)
+_UNSAFE_CHROMIUM_SANDBOX_PATTERN = re.compile(
+    r"(?<![\w-])(?:"
+    + "|".join(
+        re.escape(flag)
+        for flag in sorted(_UNSAFE_CHROMIUM_SANDBOX_ARGS, key=len, reverse=True)
+    )
+    + r")(?![\w-])"
+)
+_SANDBOXED_CHROMIUM_WRAPPER = Path(__file__).with_name("_sandboxed_chromium.py")
+_REAL_CHROMIUM_ENV = "HERMES_CHROMIUM_EXECUTABLE"
+
 # Max chars for snapshot content before truncation/summarization. Aligned
 # with web_tools.DEFAULT_EXTRACT_CHAR_LIMIT (15000) — the snapshot and
 # web_extract paths share the same truncate-and-store pattern, so the model
@@ -342,8 +369,191 @@ def _get_open_command_timeout(*, first_open: bool = False) -> int:
     return max(base, floor)
 
 
-def _needs_chromium_sandbox_bypass() -> bool:
+def _force_chromium_sandbox(env: Optional[dict] = None) -> bool:
+    """Return whether local Chromium must launch with its sandbox enabled.
+
+    An explicit ``browser.force_sandbox`` config value is authoritative,
+    including ``false``. Administrator-managed config wins over the user's
+    raw value at the same leaf. The environment variable remains a backward-
+    compatible deployment fallback only when both config layers omit the key.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+        from hermes_cli.managed_scope import apply_managed_overlay
+
+        # Keep this presence-sensitive: load_config() includes the canonical
+        # false default, which would make the legacy environment fallback
+        # unreachable. read_raw_config() returns an owned copy, so applying the
+        # administrator overlay in place cannot mutate its cache.
+        browser_cfg = apply_managed_overlay(read_raw_config()).get("browser", {})
+        if isinstance(browser_cfg, dict) and "force_sandbox" in browser_cfg:
+            return is_truthy_value(browser_cfg["force_sandbox"], default=False)
+    except Exception as exc:
+        logger.debug("Could not read browser.force_sandbox from config: %s", exc)
+
+    source = os.environ if env is None else env
+    return is_truthy_value(source.get(_FORCE_CHROMIUM_SANDBOX_ENV), default=False)
+
+
+def _executable_file(path: Union[str, Path]) -> Optional[Path]:
+    """Resolve *path* only when it names an executable regular file."""
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        return None
+    return resolved
+
+
+def _resolve_chromium_executable(env: dict) -> Optional[Path]:
+    """Resolve the real local Chromium binary for the sandbox-enforcing shim.
+
+    The order mirrors agent-browser's native discovery closely enough to keep
+    an explicit operator choice authoritative while covering its managed cache,
+    system browsers, and the Playwright cache used by the Hermes Docker image.
+    """
+    explicit = str(env.get("AGENT_BROWSER_EXECUTABLE_PATH", "")).strip()
+    if explicit:
+        direct = _executable_file(explicit)
+        if direct:
+            return direct
+        found = shutil.which(explicit, path=env.get("PATH") or None)
+        if found:
+            return _executable_file(found)
+        return None
+
+    home = Path(env.get("HOME") or os.path.expanduser("~"))
+
+    # agent-browser's own Chrome-for-Testing cache (newest version first).
+    managed_root = home / ".agent-browser" / "browsers"
+    try:
+        managed_versions = sorted(managed_root.glob("chrome-*"), reverse=True)
+    except OSError:
+        managed_versions = []
+    for version_dir in managed_versions:
+        for relative in ("chrome", "chrome-linux64/chrome"):
+            candidate = _executable_file(version_dir / relative)
+            if candidate:
+                return candidate
+
+    # System Chrome/Chromium, in agent-browser's Linux preference order.
+    for name in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium-browser",
+        "chromium",
+        "brave-browser",
+        "brave-browser-stable",
+        "chrome",
+    ):
+        found = shutil.which(name, path=env.get("PATH") or None)
+        if found:
+            candidate = _executable_file(found)
+            if candidate:
+                return candidate
+
+    playwright_roots: list[Path] = []
+    configured_root = str(env.get("PLAYWRIGHT_BROWSERS_PATH", "")).strip()
+    if configured_root and configured_root != "0":
+        playwright_roots.append(Path(configured_root).expanduser())
+    playwright_roots.append(home / ".cache" / "ms-playwright")
+
+    # Playwright has used both chrome-linux/headless_shell and
+    # chrome-headless-shell-linux64/chrome-headless-shell layouts. Cover the
+    # full Chromium build too because non-Docker installations may have it.
+    patterns = (
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+        "chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell",
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-linux64/chrome",
+    )
+    for root in playwright_roots:
+        for pattern in patterns:
+            try:
+                matches = sorted(root.glob(pattern), reverse=True)
+            except OSError:
+                matches = []
+            for match in matches:
+                candidate = _executable_file(match)
+                if candidate:
+                    return candidate
+    return None
+
+
+def _unsafe_sandbox_arg(env: dict) -> Optional[tuple[str, str]]:
+    """Return the source and flag that conflict with forced sandboxing."""
+    for key in ("AGENT_BROWSER_ARGS", "AGENT_BROWSER_CHROME_FLAGS"):
+        raw = str(env.get(key, ""))
+        for arg in re.split(r"[,\n]", raw):
+            name = arg.strip().split("=", 1)[0]
+            if name in _UNSAFE_CHROMIUM_SANDBOX_ARGS:
+                return key, name
+    return None
+
+
+def _prepare_forced_chromium_sandbox(browser_env: dict) -> Optional[str]:
+    """Route agent-browser through a shim that removes its automatic bypass.
+
+    agent-browser 0.26 adds ``--no-sandbox`` after user arguments whenever it
+    detects Docker, CI, or another container. The explicit force mode therefore
+    cannot be implemented by suppressing Hermes' own injection alone. Pointing
+    agent-browser at our small executable shim lets the final Chromium argv
+    stay sandboxed without modifying the third-party native binary.
+
+    Returns an actionable error instead of weakening the launch when the
+    invariant cannot be established.
+    """
+    if not _force_chromium_sandbox(browser_env):
+        return None
+    if not sys.platform.startswith("linux"):
+        return (
+            f"{_FORCE_CHROMIUM_SANDBOX_LABEL} currently supports Linux local "
+            "Chromium only"
+        )
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return (
+            f"{_FORCE_CHROMIUM_SANDBOX_LABEL} requires Hermes and Chromium to "
+            "run as a non-root user; refusing to retry with --no-sandbox"
+        )
+
+    unsafe_setting = _unsafe_sandbox_arg(browser_env)
+    if unsafe_setting:
+        source, unsafe_arg = unsafe_setting
+        return (
+            f"{_FORCE_CHROMIUM_SANDBOX_LABEL} conflicts with {unsafe_arg} in "
+            f"{source}; remove the sandbox-bypass flag"
+        )
+
+    wrapper = _executable_file(_SANDBOXED_CHROMIUM_WRAPPER)
+    if wrapper is None:
+        return (
+            f"{_FORCE_CHROMIUM_SANDBOX_LABEL} cannot locate the Hermes "
+            "sandbox-enforcing Chromium wrapper; refusing an unsandboxed launch"
+        )
+
+    real_chromium = _resolve_chromium_executable(browser_env)
+    if real_chromium is None:
+        return (
+            f"{_FORCE_CHROMIUM_SANDBOX_LABEL} could not resolve an executable "
+            "Chromium binary. Set AGENT_BROWSER_EXECUTABLE_PATH to the real "
+            "Chrome/Chromium executable; refusing to retry with --no-sandbox"
+        )
+    if real_chromium == wrapper:
+        return (
+            "AGENT_BROWSER_EXECUTABLE_PATH points at the Hermes sandbox wrapper "
+            "instead of the real Chromium executable"
+        )
+
+    browser_env[_REAL_CHROMIUM_ENV] = str(real_chromium)
+    browser_env["AGENT_BROWSER_EXECUTABLE_PATH"] = str(wrapper)
+    return None
+
+
+def _needs_chromium_sandbox_bypass(env: Optional[dict] = None) -> bool:
     """Return True when Chromium needs --no-sandbox to start reliably."""
+    if _force_chromium_sandbox(env):
+        return False
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return True
     if _running_in_docker():
@@ -387,6 +597,7 @@ def _format_browser_timeout_error(
     timeout: int,
     stdout: str,
     stderr: str,
+    env: Optional[dict] = None,
 ) -> str:
     """Build an actionable timeout message from captured daemon output."""
     parts = [f"Command timed out after {timeout} seconds"]
@@ -397,11 +608,19 @@ def _format_browser_timeout_error(
     combined = f"{stderr}\n{stdout}".lower()
     hints: list[str] = []
     if "sandbox" in combined:
-        hints.append(
-            "Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
-            "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
-            "or run: npx agent-browser install --with-deps"
-        )
+        if _force_chromium_sandbox(env):
+            hints.append(
+                "Chromium sandbox launch failed while "
+                f"{_FORCE_CHROMIUM_SANDBOX_LABEL}. Verify that Hermes runs as "
+                "a non-root user and that AppArmor/seccomp permit unprivileged "
+                "user namespaces. Hermes did not retry without the sandbox."
+            )
+        else:
+            hints.append(
+                "Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
+                "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
+                "or run: npx agent-browser install --with-deps"
+            )
     elif command == "open" and _is_local_mode():
         if _running_in_docker():
             hints.append(
@@ -419,6 +638,28 @@ def _format_browser_timeout_error(
     if hints:
         parts.extend(hints)
     return "\n".join(parts)
+
+
+def _contains_unsafe_sandbox_guidance(error: object) -> bool:
+    """Return whether an error contains an exact unsafe Chromium flag token."""
+    return _UNSAFE_CHROMIUM_SANDBOX_PATTERN.search(str(error or "")) is not None
+
+
+def _format_forced_sandbox_launch_error(error: object) -> str:
+    """Replace third-party bypass suggestions with fail-closed guidance."""
+    detail_lines = [
+        line
+        for line in str(error or "").splitlines()
+        if not _contains_unsafe_sandbox_guidance(line)
+    ]
+    detail = "\n".join(detail_lines).strip()
+    message = (
+        "Chromium sandbox launch failed while "
+        f"{_FORCE_CHROMIUM_SANDBOX_LABEL}. Verify that Hermes runs as a "
+        "non-root user and that AppArmor/seccomp permit unprivileged user "
+        "namespaces. Hermes did not retry without the sandbox."
+    )
+    return f"{message}\n{detail}" if detail else message
 
 
 def _get_vision_model() -> Optional[str]:
@@ -1164,13 +1405,20 @@ def _run_chrome_fallback_command(
     base_args = cmd_prefix + ["--engine", "chrome", "--session", tmp_session, "--json"]
 
     task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
-    os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
     browser_env = _build_browser_env()
     browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
         browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
+
+    if _force_chromium_sandbox(browser_env):
+        force_error = _prepare_forced_chromium_sandbox(browser_env)
+        if force_error:
+            logger.warning("Chrome fallback blocked: %s", force_error)
+            return {"success": False, "error": f"Chrome fallback blocked: {force_error}"}
+
+    os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
 
     def _run_tmp(cmd: str, cmd_args: List[str]) -> Dict[str, Any]:
         full = base_args + [cmd] + cmd_args
@@ -2548,6 +2796,7 @@ def _run_browser_command(
         command
     ] + args
 
+    force_sandbox_active = False
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.
         # Without this, parallel workers fight over the same default socket path,
@@ -2579,6 +2828,23 @@ def _run_browser_command(
             idle_ms = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
             browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = idle_ms
 
+        # A positive sandbox opt-in must control the final Chromium argv, not
+        # just Hermes' own default flags. agent-browser 0.26 independently adds
+        # --no-sandbox in Docker/CI after parsing AGENT_BROWSER_ARGS, so local
+        # Chrome runs through a small filtering executable shim in this mode.
+        # Cloud CDP sessions do not launch local Chromium. Lightpanda may use
+        # the separately prepared Chrome fallback, which enforces this mode.
+        if (
+            not session_info.get("cdp_url")
+            and engine != "lightpanda"
+            and _force_chromium_sandbox(browser_env)
+        ):
+            force_error = _prepare_forced_chromium_sandbox(browser_env)
+            if force_error:
+                logger.warning("browser command blocked: %s", force_error)
+                return {"success": False, "error": force_error}
+            force_sandbox_active = True
+
         # Inject --no-sandbox when needed (issue #15765):
         # - Running as root: Chromium always refuses to start without it
         # - Ubuntu 23.10+ / AppArmor systems: unprivileged user namespaces
@@ -2591,7 +2857,7 @@ def _run_browser_command(
             "AGENT_BROWSER_ARGS" not in browser_env
             and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env
         ):
-            if _needs_chromium_sandbox_bypass():
+            if _needs_chromium_sandbox_bypass(browser_env):
                 logger.debug(
                     "browser: sandbox bypass needed (root/docker/AppArmor userns) — "
                     "injecting --no-sandbox"
@@ -2655,7 +2921,9 @@ def _run_browser_command(
                            command, timeout, task_id, task_socket_dir)
             result = {
                 "success": False,
-                "error": _format_browser_timeout_error(command, timeout, stdout, stderr),
+                "error": _format_browser_timeout_error(
+                    command, timeout, stdout, stderr, browser_env
+                ),
             }
             # Fall through to fallback check below
         else:
@@ -2741,6 +3009,15 @@ def _run_browser_command(
     except Exception as e:
         logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
         result = {"success": False, "error": str(e)}
+
+    if (
+        force_sandbox_active
+        and command == "open"
+        and not result.get("success")
+        and _contains_unsafe_sandbox_guidance(result.get("error"))
+    ):
+        result = dict(result)
+        result["error"] = _format_forced_sandbox_launch_error(result.get("error"))
 
     # --- Lightpanda automatic Chrome fallback ---
     # If engine is lightpanda and the result looks broken, retry with Chrome.

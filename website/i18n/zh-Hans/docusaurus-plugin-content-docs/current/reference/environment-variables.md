@@ -140,6 +140,7 @@ description: "Hermes Agent 使用的所有环境变量完整参考"
 | `CAMOFOX_ADOPT_EXISTING_TAB` | 设为 `true` 可在创建新标签页前复用现有 Camofox 标签页 |
 | `BROWSER_INACTIVITY_TIMEOUT` | 浏览器会话不活动超时（秒） |
 | `AGENT_BROWSER_ARGS` | 额外的 Chromium 启动标志（逗号或换行分隔）。以 root 身份运行或在 AppArmor 限制的非特权用户命名空间（Ubuntu 23.10+、DGX Spark、许多容器镜像）中运行时，Hermes 自动注入 `--no-sandbox,--disable-dev-shm-usage`；仅在需要覆盖或添加其他标志时手动设置。 |
+| `AGENT_BROWSER_FORCE_SANDBOX` | 仅当 `browser.force_sandbox` 不存在时使用的旧版/部署回退。常规配置请运行 `hermes config set browser.force_sandbox true`；这需要非 root Linux 用户和可用的用户命名空间，并在无法启用沙箱时失败关闭。它会拒绝 `AGENT_BROWSER_ARGS` 或旧版 `AGENT_BROWSER_CHROME_FLAGS` 中的 `--no-sandbox`、`--no-zygote-sandbox`、`--disable-setuid-sandbox`、`--disable-namespace-sandbox`、`--disable-gpu-sandbox`、`--disable-seccomp-filter-sandbox`、`--single-process` 和 `--in-process-gpu`。显式配置值（包括 `false`）优先于该变量。在非 Linux 系统上，启用后的本地浏览器命令会报错，而不会启动浏览器。新配置不要将此行为设置写入 `.env`。 |
 | `FAL_KEY` | 图像生成（[fal.ai](https://fal.ai/)） |
 | `GROQ_API_KEY` | Groq Whisper STT API 密钥（[groq.com](https://groq.com/)） |
 | `ELEVENLABS_API_KEY` | ElevenLabs 高级 TTS 语音（[elevenlabs.io](https://elevenlabs.io/)） |
