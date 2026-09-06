@@ -1626,54 +1626,9 @@ def run_conversation(
                 and "skill_manage" in agent.valid_tool_names):
             agent._iters_since_skill += 1
         
-        # ── Pre-API-call /steer drain ──────────────────────────────────
-        # If a /steer arrived during the previous API call (while the model
-        # was thinking), drain it now — before we build api_messages — so
-        # the model sees the steer text on THIS iteration.  Without this,
-        # steers sent during an API call only land after the NEXT tool batch,
-        # which may never come if the model returns a final response.
-        #
-        # We scan backwards for the last tool-role message in the messages
-        # list.  If found, the steer is appended there.  If not (first
-        # iteration, no tools yet), the steer stays pending for the next
-        # tool batch — injecting into a user message would break role
-        # alternation, and there's no tool output to piggyback on.
-        _pre_api_steer = agent._drain_pending_steer()
-        if _pre_api_steer:
-            _injected = False
-            for _si in range(len(messages) - 1, -1, -1):
-                _sm = messages[_si]
-                if isinstance(_sm, dict) and _sm.get("role") == "tool":
-                    # Structural separation (issue #81828): insert as a
-                    # genuine role:user message right after the tool
-                    # result, rather than appending STEER_MARKER text
-                    # inside the tool message's own content. A model can
-                    # trivially reproduce the static marker text (it's
-                    # visible in its own system prompt) and self-fabricate
-                    # a plausible "user said X" block that STEER_CHANNEL_NOTE
-                    # then tells it to trust -- but it cannot fabricate a
-                    # message with role:user in the API request itself;
-                    # that's set by the runtime, not model output.
-                    messages.insert(_si + 1, {"role": "user", "content": _pre_api_steer})
-                    _injected = True
-                    logger.debug(
-                        "Pre-API-call steer drain: inserted role:user message after tool msg at index %d",
-                        _si,
-                    )
-                    break
-            if not _injected:
-                # No tool message to inject into — put it back so
-                # the post-tool-execution drain picks it up later.
-                _lock = getattr(agent, "_pending_steer_lock", None)
-                if _lock is not None:
-                    with _lock:
-                        if agent._pending_steer:
-                            agent._pending_steer = agent._pending_steer + "\n" + _pre_api_steer
-                        else:
-                            agent._pending_steer = _pre_api_steer
-                else:
-                    existing = getattr(agent, "_pending_steer", None)
-                    agent._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
+        # Reuse the post-tool boundary for steers arriving during model work.
+        # With no tool history it restashes; otherwise it appends at the tail.
+        agent._apply_pending_steer_to_tool_results(messages, len(messages))
 
         # Prepare messages for API call
         # If we have an ephemeral system prompt, prepend it to the messages

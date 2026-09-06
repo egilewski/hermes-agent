@@ -3928,23 +3928,10 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
 
 
 def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
-    """Insert any pending /steer as a genuine role:user message after the last tool result in this turn.
+    """Append a pending steer as a user message after a bounded tool-result tail.
 
-    Called at the end of a tool-call batch, before the next API call.
-    Inserted as a real role:"user" message right after the last
-    role:"tool" message, rather than appended as marker text inside the
-    tool message's own content -- a model can trivially reproduce static
-    marker text visible in its own system prompt and self-fabricate a
-    plausible "user said X" block, but it cannot fabricate a message with
-    role:user in the API request itself; that's set by the runtime, not
-    model output (issue #81828). Role alternation is preserved:
-    assistant -> tool -> user (steer) -> assistant is a standard,
-    provider-supported sequence.
-
-    Args:
-        messages: The running messages list.
-        num_tool_msgs: Number of tool results appended in this batch;
-            used to locate the tail slice safely.
+    Tool payloads and intervening assistant messages stay unchanged. With no
+    tool result in the selected tail, put the steer back for a later boundary.
     """
     if num_tool_msgs <= 0 or not messages:
         return
@@ -3975,10 +3962,9 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
             existing = getattr(agent, "_pending_steer", None)
             agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
         return
-    # Structural separation (issue #81828): insert as a genuine
-    # role:user message right after the tool result, instead of
-    # appending STEER_MARKER text inside the tool message's own content.
-    messages.insert(target_idx + 1, {"role": "user", "content": steer_text})
+    # Preserve chronology if an assistant message already follows the last
+    # tool result. A new steer belongs at the current conversation tail.
+    messages.append({"role": "user", "content": steer_text})
     _ra().logger.info(
         "Delivered /steer to agent after tool batch (%d chars): %s",
         len(steer_text),
