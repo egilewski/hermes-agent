@@ -74,23 +74,6 @@ _UPDATE_DOWNGRADE_GUARD_FLOORS = {
 }
 
 
-def test_core_python_multipart_floor_blocks_ghsa_5rvq_cxj2_64vf():
-    """Core installs must reject python-multipart versions affected by GHSA-5RVQ-CXJ2-64VF."""
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    core = data["project"]["dependencies"]
-    specs = [dep for dep in core if _distribution_name(dep) == "python-multipart"]
-
-    assert specs, "python-multipart must stay a declared core dependency for dashboard uploads"
-    assert any(
-        ">=0.0.30" in spec and "<1" in spec
-        for spec in specs
-    ), (
-        "GHSA-5RVQ-CXJ2-64VF affects python-multipart <0.0.30; the core "
-        "dependency floor must force upgrades instead of accepting vulnerable "
-        "already-installed versions"
-    )
-
-
 def _version_tuple(spec: str) -> tuple[int, ...]:
     # "1.0.1" -> (1, 0, 1); tolerant of pre/post suffixes by truncating.
     head = spec.split("+", 1)[0]
@@ -248,6 +231,45 @@ def _locked_versions(package: str) -> set[str]:
         for pkg in lock.get("package", [])
         if _canonical(pkg["name"]) == _canonical(package)
     }
+
+
+def test_core_python_multipart_floor_matches_patched_lock():
+    """Core installs must retain the multipart floor used by reviewed exact pins."""
+    from packaging.requirements import Requirement
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(dep) for dep in data["project"]["dependencies"]]
+    matches = [req for req in requirements if _canonical(req.name) == "python-multipart"]
+    assert len(matches) == 1, "dashboard uploads require one core python-multipart dependency"
+    requirement = matches[0]
+    assert requirement.marker is None, "the core multipart dependency must be unconditional"
+    floor = Version("0.0.32")
+    assert any(
+        bound.operator in {">=", ">"} and Version(bound.version) >= floor
+        for bound in requirement.specifier
+    ), "core installs must not retain multipart versions below the reviewed 0.0.32 floor"
+    assert any(
+        bound.operator == "<" and Version(bound.version) <= Version("1")
+        for bound in requirement.specifier
+    ), "the core multipart dependency must retain a ceiling below 1.0"
+    for version in ("0.0.30", "0.0.31.post999", "0.0.32rc1", "1.0"):
+        assert not requirement.specifier.contains(version, prereleases=True), version
+
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    root = next(package for package in lock["package"] if package["name"] == "hermes-agent")
+    locked_specs = [
+        SpecifierSet(dep["specifier"])
+        for dep in root["metadata"]["requires-dist"]
+        if dep["name"] == "python-multipart" and "marker" not in dep
+    ]
+    assert locked_specs == [requirement.specifier], "uv.lock must mirror the core requirement"
+    versions = _locked_versions("python-multipart")
+    assert versions, "python-multipart is missing from uv.lock"
+    assert all(Version(version) >= floor for version in versions), versions
+    assert all(requirement.specifier.contains(version) for version in versions), versions
+
 
 
 def _pyproject_pinned_specs():
