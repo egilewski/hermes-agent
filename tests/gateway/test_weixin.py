@@ -4,6 +4,9 @@ import asyncio
 import base64
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -816,7 +819,32 @@ class TestWeixinVoiceSending:
 
 
 class TestWeixinAesCrypto:
-    """Regression tests for #35432: cryptography>=48 compatibility."""
+    """Weixin AES round trips and backend-independent imports."""
+
+    def test_import_does_not_require_default_backend(self):
+        script = """
+import cryptography.hazmat.backends as backends
+from cryptography.hazmat.primitives.ciphers import Cipher
+
+# Remove only the optional symbol; exercise the real Cipher implementation.
+backends.__dict__.pop("default_backend", None)
+from gateway.platforms import weixin
+
+assert weixin.CRYPTO_AVAILABLE
+assert weixin.Cipher is Cipher
+key, plaintext = bytes(range(16)), b"weixin media"
+ciphertext = weixin._aes128_ecb_encrypt(plaintext, key)
+assert ciphertext != plaintext
+assert weixin._aes128_ecb_decrypt(ciphertext, key) == plaintext
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
 
     def test_aes128_ecb_encrypt_decrypt_round_trip(self):
         from gateway.platforms.weixin import _aes128_ecb_encrypt, _aes128_ecb_decrypt
