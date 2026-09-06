@@ -6,6 +6,7 @@ and Daytona.  Docker and Singularity use bind mounts (live host FS
 view) and don't need this.
 """
 
+import errno
 import hashlib
 import logging
 import os
@@ -133,6 +134,19 @@ def _sha256_file(path: str) -> str:
 _SYNC_BACK_MAX_RETRIES = 3
 _SYNC_BACK_BACKOFF = (2, 4, 8)  # seconds between retries
 _SYNC_BACK_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB — refuse to extract larger tars
+
+
+def _lock_with_msvcrt(lock_fd) -> None:
+    """Retry nonblocking byte-range acquisition while another sync owns the lock."""
+    lock_fd.seek(0)
+    while True:
+        try:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EACCES:
+                raise
+            _sleep(0.1)
 
 
 class FileSyncManager:
@@ -322,40 +336,29 @@ class FileSyncManager:
                     signal.raise_signal(signal.SIGINT)
 
     def _sync_back_locked(self, lock_path: Path) -> None:
-        """Sync-back under file lock (serializes concurrent gateways).
-
-        On POSIX uses fcntl.flock for cross-process serialization.
-        On Windows falls back to msvcrt.locking (byte-range lock).
-        If neither is available, logs a warning and proceeds unlocked.
-        """
+        """Serialize host writes with flock on POSIX or byte-range locking on Windows."""
         if fcntl is None and msvcrt is None:
-            logger.warning(
-                "sync_back: no file-locking module available — "
-                "proceeding without serialization"
-            )
+            logger.warning("sync_back: no file-locking module available — proceeding without serialization")
             self._sync_back_impl()
             return
-        lock_fd = open(lock_path, "a+", encoding="utf-8")
-        try:
+        # msvcrt can lock beyond EOF; atomically create without truncating or
+        # writing into a byte another process may already hold locked.
+        with open(lock_path, "a+b") as lock_fd:
             if fcntl:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             else:
-                lock_fd.seek(0)
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
-            self._sync_back_impl()
-        finally:
-            if fcntl:
+                _lock_with_msvcrt(lock_fd)
+            try:
+                self._sync_back_impl()
+            finally:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except (OSError, IOError):
+                    if fcntl:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    else:
+                        lock_fd.seek(0)
+                        msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
                     pass
-            elif msvcrt:
-                try:
-                    lock_fd.seek(0)
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except (OSError, IOError):
-                    pass
-            lock_fd.close()
 
     def _sync_back_impl(self) -> None:
         """Download, diff, and apply remote changes to host."""
